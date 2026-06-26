@@ -16,7 +16,8 @@ constexpr uint32_t OBJ_NEXT      = 0x00;
 constexpr uint32_t OBJ_PREV      = 0x04;
 constexpr uint32_t OBJ_ID        = 0x08;
 constexpr uint32_t OBJ_NAME      = 0x0c; // char*
-constexpr uint32_t OBJ_TYPE      = 0x48; // int16 (subtype packed in high half)
+constexpr uint32_t OBJ_TYPE      = 0x48; // int16 type/class id
+constexpr uint32_t OBJ_SUBTYPE   = 0x4a; // int16 (adjacent; = high half of the dword at OBJ_TYPE)
 constexpr uint32_t OBJ_PARENT    = 0x54; // container; 0 = top-level
 constexpr uint32_t OBJ_PAYLOAD   = 0x50; // type-specific payload ptr
 constexpr uint32_t OBJ_TRANSFORM = 0x6c; // ptr; position lives inside

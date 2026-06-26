@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "struct_offsets.h"
+
 namespace x3 {
 
 struct ObjInfo {
@@ -30,9 +32,10 @@ struct SectorView {
     std::vector<ObjInfo> objects;
 };
 
-// Default scene-global address (duplicated from struct_offsets.h so callers of
-// this header needn't include it). Must precede the function that defaults to it.
-constexpr uint32_t off_SCENE_GLOBAL = 0x0837a0d0u;
+// Convenience alias to the scene-global address (aliases the single source of
+// truth in struct_offsets.h — no duplicate literal). Must precede the function
+// that defaults to it.
+constexpr uint32_t off_SCENE_GLOBAL = off::SCENE_GLOBAL;
 
 // Walk the contained-object list of a type-7 sector object. cap bounds iterations.
 std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr,
