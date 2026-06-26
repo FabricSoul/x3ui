@@ -104,8 +104,13 @@ static void overlay_init(SDL_Window *window)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;   // never write imgui.ini into the game's cwd
+    // Persist window layout to OUR dir (writable, on the LD_PRELOAD path) rather
+    // than the game's cwd. Re-enables ImGui's auto save/load of imgui.ini.
+    io.IniFilename = "/home/fabric/x3ui/imgui.ini";
     io.LogFilename = nullptr;
+    // Draw ImGui's own software cursor; the SDL backend then keeps the OS/X11
+    // cursor hidden while the overlay is up (no stray X11 arrow over the game).
+    io.MouseDrawCursor = true;
     ImGui::StyleColorsDark();
 
     SDL_GLContext ctx = SDL_GL_GetCurrentContext();
@@ -816,7 +821,6 @@ X3UI_EXPORT int SDL_PeepEvents(SDL_Event *events, int numevents,
     if (!is_game_process() || !g_inited || action != SDL_GETEVENT || n <= 0)
         return n;
 
-    ImGuiIO &io = ImGui::GetIO();
     int kept = 0;
     for (int i = 0; i < n; ++i) {
         SDL_Event &e = events[i];
@@ -831,17 +835,21 @@ X3UI_EXPORT int SDL_PeepEvents(SDL_Event *events, int numevents,
 
         ImGui_ImplSDL2_ProcessEvent(&e);
 
-        // When the UI is up and wants the input, swallow it from the game.
-        bool swallow = g_ui_visible &&
-            ((io.WantCaptureMouse &&
-              (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP ||
-               e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEWHEEL)) ||
-             (io.WantCaptureKeyboard &&
-              (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ||
-               e.type == SDL_TEXTINPUT)));
+        // While the overlay is up it is MODAL: ImGui receives the input above,
+        // and the game sees NO input events. X3 reads input through the event
+        // queue (not by polling key/mouse state), so dropping these events fully
+        // blocks game input. Non-input events (quit, window resize, focus, etc.)
+        // still pass through so the game keeps working normally.
+        bool input_event =
+            e.type == SDL_KEYDOWN     || e.type == SDL_KEYUP        ||
+            e.type == SDL_TEXTINPUT   || e.type == SDL_TEXTEDITING  ||
+            e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN ||
+            e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEWHEEL;
 
-        if (!swallow)
-            events[kept++] = e;   // compact kept events back into the buffer
+        if (g_ui_visible && input_event)
+            continue;             // swallow: game gets no input while overlay is open
+
+        events[kept++] = e;       // compact kept events back into the buffer
     }
     return kept;
 }
