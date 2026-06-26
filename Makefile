@@ -31,7 +31,7 @@ CXXFLAGS := -std=c++17 -O2 -fPIC -Wall \
 LDFLAGS  := -shared -static-libstdc++ -static-libgcc \
 	$(shell pkg-config --libs sdl2) -lGL -ldl
 
-.PHONY: all clean inspect
+.PHONY: all clean inspect test
 all: $(TARGET)
 
 $(BUILD)/%.o: %.cpp
@@ -57,3 +57,12 @@ inspect:
 
 clean:
 	rm -rf $(BUILD) $(TARGET)
+
+# Host unit tests for the pure walk logic (no SDL/GL/ImGui). Runs in or out of
+# the nix-shell — sector_reader is arch-independent (fixed-width types only).
+test:
+	@mkdir -p $(BUILD)
+	g++ -std=c++17 -I src -O0 -g \
+		src/sector_reader.cpp tests/test_sector_reader.cpp \
+		-o $(BUILD)/test_sector_reader
+	$(BUILD)/test_sector_reader

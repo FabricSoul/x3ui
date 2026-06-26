@@ -1,0 +1,38 @@
+#pragma once
+#include <cstdint>
+
+// Verified engine struct offsets (X3 32-bit engine, non-PIE @0x08048000).
+// Single source of truth — do not hardcode these numbers elsewhere.
+namespace x3 { namespace off {
+
+// Global that holds the scene-manager pointer.
+constexpr uint32_t SCENE_GLOBAL          = 0x0837a0d0u;
+
+// scene-mgr fields
+constexpr uint32_t SCENE_PLAYER_ANCHOR   = 0x38; // -> player sector (type 7) OR player ship
+
+// object header
+constexpr uint32_t OBJ_NEXT      = 0x00;
+constexpr uint32_t OBJ_PREV      = 0x04;
+constexpr uint32_t OBJ_ID        = 0x08;
+constexpr uint32_t OBJ_NAME      = 0x0c; // char*
+constexpr uint32_t OBJ_TYPE      = 0x48; // int16 (subtype packed in high half)
+constexpr uint32_t OBJ_PARENT    = 0x54; // container; 0 = top-level
+constexpr uint32_t OBJ_PAYLOAD   = 0x50; // type-specific payload ptr
+constexpr uint32_t OBJ_TRANSFORM = 0x6c; // ptr; position lives inside
+
+// sector (type 7) payload: child-object intrusive list
+constexpr uint32_t SEC_LIST_HEAD     = 0x00; // *(payload+0) = first child node
+constexpr uint32_t SEC_LIST_SENTINEL = 0x04; // node == payload+4 -> end of list
+
+// transform: position (raw 32-bit words; int-vs-float confirmed live)
+constexpr uint32_t TF_X = 0x2c;
+constexpr uint32_t TF_Y = 0x30;
+constexpr uint32_t TF_Z = 0x34;
+
+// type ids (object +0x48)
+constexpr int16_t TYPE_SHIP    = 5;
+constexpr int16_t TYPE_STATION = 6;
+constexpr int16_t TYPE_SECTOR  = 7;
+
+}} // namespace x3::off
