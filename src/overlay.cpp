@@ -113,9 +113,11 @@ static void overlay_init(SDL_Window *window)
     // than the game's cwd. Re-enables ImGui's auto save/load of imgui.ini.
     io.IniFilename = "/home/fabric/x3ui/imgui.ini";
     io.LogFilename = nullptr;
-    // Draw ImGui's own software cursor; the SDL backend then keeps the OS/X11
-    // cursor hidden while the overlay is up (no stray X11 arrow over the game).
-    io.MouseDrawCursor = true;
+    // Never let the SDL backend force the OS/X11 cursor on; we manage cursor
+    // visibility ourselves below (ImGui's own cursor only while hovering the
+    // overlay; over the game world the game keeps its own cursor).
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    io.MouseDrawCursor = false;
     ImGui::StyleColorsDark();
 
     SDL_GLContext ctx = SDL_GL_GetCurrentContext();
@@ -747,6 +749,10 @@ static void overlay_draw(void)
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
+    // Draw ImGui's cursor only while hovering the overlay; over the game world
+    // draw nothing so the game's own cursor shows through.
+    ImGui::GetIO().MouseDrawCursor = ImGui::GetIO().WantCaptureMouse;
 
     ImGui::SetNextWindowBgAlpha(0.85f);
     if (ImGui::Begin("x3ui")) {
