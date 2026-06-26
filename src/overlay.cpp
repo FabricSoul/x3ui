@@ -38,6 +38,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_opengl3.h"
+#include "sector_reader.h"
 
 #define X3UI_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -645,6 +646,90 @@ static int msci_find_id(const char *entry)
     return -1;
 }
 
+// Production Mem: read the game's own address space via /proc/self/mem (the same
+// safe pread path the scanners use — bad addresses return false, never crash).
+static x3::Mem make_engine_mem(void)
+{
+    x3::Mem m;
+    m.u32 = [](uint32_t a, uint32_t& o) -> bool {
+        int32_t v;
+        if (!mem_read_i32((uintptr_t)a, &v)) return false;
+        o = (uint32_t)v;
+        return true;
+    };
+    m.cstr = [](uint32_t addr, size_t maxlen) -> std::string {
+        std::string s;
+        if (!addr) return s;
+        for (size_t i = 0; i < maxlen; i += 4) {
+            int32_t w = 0;
+            if (!mem_read_i32((uintptr_t)(addr + i), &w)) break;
+            const char* b = (const char*)&w;
+            for (int k = 0; k < 4 && (i + (size_t)k) < maxlen; ++k) {
+                if (b[k] == '\0') return s;
+                s.push_back(b[k]);
+            }
+        }
+        return s;
+    };
+    return m;
+}
+
+// Read-only panel: list the objects in the player's current sector.
+static void map_panel(void)
+{
+    if (!ImGui::Begin("x3ui - sector map")) { ImGui::End(); return; }
+    mem_open();
+
+    // Throttle: re-walk at most ~6x/sec (cheap, but no need per-frame).
+    static x3::SectorView view;
+    static double last = -1.0;
+    double now = ImGui::GetTime();
+    if (last < 0.0 || (now - last) > 0.15) {
+        view = x3::read_current_sector(make_engine_mem());
+        last = now;
+    }
+
+    if (!view.in_sector) {
+        ImGui::TextDisabled("not in a sector (main menu / loading?)");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("sector: %s  @ 0x%08x   (%zu objects)",
+                view.sector_name.empty() ? "(unnamed)" : view.sector_name.c_str(),
+                view.sector_addr, view.objects.size());
+
+    static int filter = 0; // 0 = all, else a type id
+    ImGui::RadioButton("all", &filter, 0);      ImGui::SameLine();
+    ImGui::RadioButton("ships", &filter, 5);    ImGui::SameLine();
+    ImGui::RadioButton("stations", &filter, 6);
+
+    if (ImGui::BeginTable("objs", 5,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+            ImGuiTableFlags_RowBg, ImVec2(0, 320))) {
+        ImGui::TableSetupColumn("id");
+        ImGui::TableSetupColumn("type");
+        ImGui::TableSetupColumn("name");
+        ImGui::TableSetupColumn("pos (int)");
+        ImGui::TableSetupColumn("pos (float)");
+        ImGui::TableHeadersRow();
+        for (const auto& o : view.objects) {
+            if (filter != 0 && o.type != filter) continue;
+            float fx, fy, fz;
+            memcpy(&fx, &o.x, 4); memcpy(&fy, &o.y, 4); memcpy(&fz, &o.z, 4);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("%u", o.id);
+            ImGui::TableNextColumn(); ImGui::Text("%s(%d)", x3::type_label(o.type), o.type);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(o.name.empty() ? "(unnamed)" : o.name.c_str());
+            ImGui::TableNextColumn(); ImGui::Text("%d,%d,%d", o.x, o.y, o.z);
+            ImGui::TableNextColumn(); ImGui::Text("%.0f,%.0f,%.0f", fx, fy, fz);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
 static void overlay_draw(void)
 {
     ImGui_ImplOpenGL3_NewFrame();
@@ -695,6 +780,7 @@ static void overlay_draw(void)
 
     state_bridge_window();
     ship_window();
+    map_panel();
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
