@@ -39,6 +39,7 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "sector_reader.h"
+#include "debug_server.h"
 
 #define X3UI_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -841,8 +842,11 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
         return;
     }
 
-    if (!g_inited && SDL_GL_GetCurrentContext())
+    if (!g_inited && SDL_GL_GetCurrentContext()) {
         overlay_init(window);
+        mem_open();                                 // open /proc/self/mem for reads
+        x3::start_debug_server(make_engine_mem());  // localhost:7373, read-only
+    }
 
     if (g_inited && g_ui_visible)
         overlay_draw();

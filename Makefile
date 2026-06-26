@@ -17,10 +17,10 @@ IMGUI_SRC := \
 	$(IMGUI)/backends/imgui_impl_sdl2.cpp \
 	$(IMGUI)/backends/imgui_impl_opengl3.cpp
 
-SRC      := src/overlay.cpp src/sector_reader.cpp $(IMGUI_SRC)
+SRC      := src/overlay.cpp src/sector_reader.cpp src/debug_server.cpp $(IMGUI_SRC)
 OBJ      := $(patsubst %.cpp,$(BUILD)/%.o,$(SRC))
 
-CXXFLAGS := -std=c++17 -O2 -fPIC -Wall \
+CXXFLAGS := -std=c++17 -O2 -fPIC -Wall -pthread \
 	-I$(IMGUI) -I$(IMGUI)/backends \
 	$(shell pkg-config --cflags sdl2) \
 	$(shell pkg-config --cflags gl 2>/dev/null)
@@ -28,7 +28,7 @@ CXXFLAGS := -std=c++17 -O2 -fPIC -Wall \
 # -static-libstdc++/-static-libgcc: don't depend on the container's (older)
 # libstdc++ ABI. We keep dynamic links only to soname'd SDL2/GL/libc, which the
 # game already provides at runtime.
-LDFLAGS  := -shared -static-libstdc++ -static-libgcc \
+LDFLAGS  := -shared -static-libstdc++ -static-libgcc -pthread \
 	$(shell pkg-config --libs sdl2) -lGL -ldl
 
 .PHONY: all clean inspect test
@@ -66,3 +66,7 @@ test:
 		src/sector_reader.cpp tests/test_sector_reader.cpp \
 		-o $(BUILD)/test_sector_reader
 	$(BUILD)/test_sector_reader
+	g++ -std=c++17 -I src -O0 -g -pthread \
+		src/sector_reader.cpp src/debug_server.cpp tests/test_debug_server.cpp \
+		-o $(BUILD)/test_debug_server
+	$(BUILD)/test_debug_server

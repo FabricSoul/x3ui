@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# x3dbg — query the x3ui in-game debug server (read-only).
+# The overlay (libx3ui.so) listens on 127.0.0.1:7373 once the game is running.
+#
+# usage:
+#   tools/x3dbg ping
+#   tools/x3dbg scene
+#   tools/x3dbg sector
+#   tools/x3dbg read 0x0837a0d0
+#   tools/x3dbg chain 0x<anchor>
+#   tools/x3dbg children 0x<obj>
+#   tools/x3dbg obj 0x<addr>
+set -u
+host=127.0.0.1; port=7373
+if ! exec 3<>"/dev/tcp/$host/$port" 2>/dev/null; then
+    echo "x3dbg: can't connect to $host:$port — is X3 running with the overlay?" >&2
+    exit 1
+fi
+printf '%s\n' "$*" >&3
+timeout 0.6 cat <&3
+exec 3<&- 3>&- 2>/dev/null || true
