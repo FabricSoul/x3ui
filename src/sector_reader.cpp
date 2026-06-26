@@ -26,28 +26,39 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
     uint32_t node = 0;
     if (!ru32(mem, payload + off::SEC_LIST_HEAD, node)) return out;
 
-    size_t n = 0;
-    while (node && node != sentinel && n < cap) {
-        ObjInfo o;
-        uint32_t w = 0;
-        if (ru32(mem, node + off::OBJ_ID, w)) o.id = w;
-        if (ru32(mem, node + off::OBJ_TYPE, w)) {
-            o.type    = (int16_t)(w & 0xFFFF);
-            o.subtype = (int16_t)(w >> 16);
+    size_t iter = 0;
+    while (node && node != sentinel && iter < cap) {
+        ++iter;
+
+        // Visibility gate — replicate the game's gravidar / sector-map filter so
+        // we show the player-visible subset, not the engine's omniscient list:
+        //   hide if (+0x40 & 0x11)        internal sub-part / non-contact flag
+        //   hide if (+0x44 & 0x20000000)  camera / debris / wreck / *** UNDEFINED ***
+        // (read failures leave the flag 0 -> treated as visible, e.g. in tests).
+        uint32_t f40 = 0, f44 = 0;
+        ru32(mem, node + off::OBJ_FLAGS,  f40);
+        ru32(mem, node + off::OBJ_FLAGS2, f44);
+        bool hidden = (f40 & 0x11u) || (f44 & 0x20000000u);
+
+        if (!hidden) {
+            ObjInfo o;
+            uint32_t w = 0;
+            if (ru32(mem, node + off::OBJ_ID, w)) o.id = w;
+            if (ru32(mem, node + off::OBJ_TYPE, w)) {
+                o.type    = (int16_t)(w & 0xFFFF);
+                o.subtype = (int16_t)(w >> 16);
+            }
+            uint32_t nameptr = 0;
+            if (ru32(mem, node + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
+                o.name = mem.cstr(nameptr, 64);
+            uint32_t tf = 0;
+            if (ru32(mem, node + off::OBJ_TRANSFORM, tf) && tf) {
+                if (ru32(mem, tf + off::TF_X, w)) o.x = (int32_t)w;
+                if (ru32(mem, tf + off::TF_Y, w)) o.y = (int32_t)w;
+                if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
+            }
+            out.push_back(std::move(o));
         }
-        uint32_t nameptr = 0;
-        if (ru32(mem, node + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
-            o.name = mem.cstr(nameptr, 64);
-        uint32_t tf = 0;
-        if (ru32(mem, node + off::OBJ_TRANSFORM, tf) && tf) {
-            if (ru32(mem, tf + off::TF_X, w)) o.x = (int32_t)w;
-            if (ru32(mem, tf + off::TF_Y, w)) o.y = (int32_t)w;
-            if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
-        }
-        // Keep the object even if its next-link is unreadable; the break below
-        // then stops the walk (partial data beats dropping a visible object).
-        out.push_back(std::move(o));
-        ++n;
 
         uint32_t next = 0;
         if (!ru32(mem, node + off::OBJ_NEXT, next)) break;

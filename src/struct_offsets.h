@@ -17,6 +17,8 @@ constexpr uint32_t OBJ_NEXT      = 0x00;
 constexpr uint32_t OBJ_PREV      = 0x04;
 constexpr uint32_t OBJ_ID        = 0x08;
 constexpr uint32_t OBJ_NAME      = 0x0c; // char*
+constexpr uint32_t OBJ_FLAGS     = 0x40; // flag word; bit0|bit4 (0x11) -> hidden/internal contact
+constexpr uint32_t OBJ_FLAGS2    = 0x44; // flag word; bit29 (0x20000000) -> camera/debris/wreck/internal
 constexpr uint32_t OBJ_TYPE      = 0x48; // int16 type/class id
 constexpr uint32_t OBJ_SUBTYPE   = 0x4a; // int16 (adjacent; = high half of the dword at OBJ_TYPE)
 constexpr uint32_t OBJ_PARENT    = 0x54; // container; 0 = top-level
