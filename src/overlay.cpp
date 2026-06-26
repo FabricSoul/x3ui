@@ -64,9 +64,11 @@ __attribute__((weak)) void SDL_Vulkan_GetDrawableSize(SDL_Window *w, int *width,
 // ---- originals, resolved lazily ------------------------------------------
 typedef void (*pfn_SwapWindow)(SDL_Window *);
 typedef int  (*pfn_PeepEvents)(SDL_Event *, int, SDL_eventaction, Uint32, Uint32);
+typedef void (*pfn_PumpEvents)(void);
 
 static pfn_SwapWindow real_SwapWindow = nullptr;
 static pfn_PeepEvents real_PeepEvents = nullptr;
+static pfn_PumpEvents real_PumpEvents = nullptr;
 
 static void resolve_originals(void)
 {
@@ -74,6 +76,8 @@ static void resolve_originals(void)
         real_SwapWindow = (pfn_SwapWindow)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
     if (!real_PeepEvents)
         real_PeepEvents = (pfn_PeepEvents)dlsym(RTLD_NEXT, "SDL_PeepEvents");
+    if (!real_PumpEvents)
+        real_PumpEvents = (pfn_PumpEvents)dlsym(RTLD_NEXT, "SDL_PumpEvents");
 }
 
 // Process gate: the .so is inherited by every process in X3's launch chain, but
@@ -685,6 +689,42 @@ static void map_panel(void)
     if (!ImGui::Begin("x3ui - sector map")) { ImGui::End(); return; }
     mem_open();
 
+    // ---- TEMP DIAGNOSTIC: settle "is *(scene+0x38) the sector or the ship?" ----
+    // Ghidra says it's the current SECTOR (type 7); the live walk showed ship
+    // cargo. Show the anchor, its parent chain (+0x54), and its first children so
+    // we can read the real runtime type/name values. Remove once resolved.
+    {
+        x3::Mem dm = make_engine_mem();
+        uint32_t scene = 0, anchor = 0;
+        dm.u32(0x0837a0d0u, scene);
+        if (scene) dm.u32(scene + 0x38, anchor);
+        ImGui::SeparatorText("DIAG (temp)");
+        ImGui::Text("scene=0x%08x  anchor *(scene+0x38)=0x%08x", scene, anchor);
+
+        uint32_t cur = anchor;
+        for (int lvl = 0; lvl < 5 && cur; ++lvl) {
+            uint32_t tw = 0, np = 0; int ty = -1; std::string nm;
+            if (dm.u32(cur + 0x48, tw)) ty = (int16_t)(tw & 0xFFFF);
+            if (dm.u32(cur + 0x0c, np) && np) nm = dm.cstr(np, 48);
+            ImGui::Text("  parent[%d] 0x%08x type=%d name='%s'", lvl, cur, ty, nm.c_str());
+            uint32_t p = 0;
+            if (!dm.u32(cur + 0x54, p)) break;
+            cur = p;
+        }
+
+        uint32_t payload = 0, node = 0;
+        if (anchor) dm.u32(anchor + 0x50, payload);
+        if (payload) dm.u32(payload + 0x00, node);
+        uint32_t sentinel = payload + 0x04;
+        for (int i = 0; i < 6 && node && node != sentinel; ++i) {
+            uint32_t tw = 0, np = 0; int ty = -1; std::string nm;
+            if (dm.u32(node + 0x48, tw)) ty = (int16_t)(tw & 0xFFFF);
+            if (dm.u32(node + 0x0c, np) && np) nm = dm.cstr(np, 48);
+            ImGui::Text("  child[%d] 0x%08x type=%d name='%s'", i, node, ty, nm.c_str());
+            uint32_t nx = 0; if (!dm.u32(node + 0x00, nx)) break; node = nx;
+        }
+    }
+
     // Throttle: re-walk at most ~6x/sec (cheap, but no need per-frame).
     static x3::SectorView view;
     static double last = -1.0;
@@ -808,6 +848,48 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
         overlay_draw();
 
     real_SwapWindow(window);
+}
+
+// ---- interposed: event-queue pump ----------------------------------------
+// X3 reads input by PEEK-ing the queue (SDL_PeepEvents action=PEEK) and acting
+// on it, only GET-ing afterwards to clear it — so filtering GET events is too
+// late. Here, right after the real pump fills the queue, we drain keyboard+mouse
+// out of it while the overlay is up, routing them to ImGui. The game's later
+// PEEK then finds nothing. ScrollLock still toggles. When the overlay is hidden
+// we touch nothing, so the game keeps all its input exactly as before.
+X3UI_EXPORT void SDL_PumpEvents(void)
+{
+    resolve_originals();
+    if (real_PumpEvents) real_PumpEvents();
+
+    if (!is_game_process() || !g_inited || !g_ui_visible || !real_PeepEvents)
+        return;
+
+    SDL_Event buf[64];
+
+    // Keyboard incl. text input (0x300..0x303). Catch the ScrollLock toggle here.
+    for (int guard = 0; guard < 32; ++guard) {
+        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_KEYDOWN, SDL_TEXTINPUT);
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i) {
+            SDL_Event &e = buf[i];
+            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_SCROLLLOCK) {
+                g_ui_visible = !g_ui_visible;
+                fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
+                continue;
+            }
+            ImGui_ImplSDL2_ProcessEvent(&e);
+        }
+        if (n < 64) break;
+    }
+    // Mouse motion / buttons / wheel (0x400..0x403).
+    for (int guard = 0; guard < 32; ++guard) {
+        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i)
+            ImGui_ImplSDL2_ProcessEvent(&buf[i]);
+        if (n < 64) break;
+    }
 }
 
 // ---- interposed: event pump ----------------------------------------------
