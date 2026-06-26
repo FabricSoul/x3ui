@@ -49,7 +49,7 @@ static void test_two_objects() {
     fm.w(0x6100 + 0x30, (uint32_t)60);
     fm.w(0x6100 + 0x34, (uint32_t)70);
 
-    x3::SectorView v = x3::read_current_sector(fm.mem());
+    x3::SectorView v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
     CHECK(v.in_sector);
     CHECK_EQ(v.sector_addr, 0x2000u);
     CHECK_STR(v.sector_name.c_str(), "Argon Prime");
@@ -65,6 +65,9 @@ static void test_two_objects() {
     CHECK_EQ(v.objects[1].id, 202u);
     CHECK_EQ(v.objects[1].type, (int16_t)6);
     CHECK_STR(v.objects[1].name.c_str(), "Trade Stn");
+    CHECK_EQ(v.objects[1].x, 50);
+    CHECK_EQ(v.objects[1].y, 60);
+    CHECK_EQ(v.objects[1].z, 70);
 }
 
 int main() {

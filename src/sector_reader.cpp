@@ -7,6 +7,8 @@ static bool ru32(const Mem& m, uint32_t addr, uint32_t& out) {
     return m.u32 && m.u32(addr, out);
 }
 
+// Returns the object's type id, or -1 (no valid type) if the read fails.
+// -1 never matches any TYPE_* constant, so callers can treat it as "unknown".
 static int16_t read_type(const Mem& m, uint32_t obj) {
     uint32_t w = 0;
     if (!ru32(m, obj + off::OBJ_TYPE, w)) return -1;
@@ -42,6 +44,8 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
             if (ru32(mem, tf + off::TF_Y, w)) o.y = (int32_t)w;
             if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
         }
+        // Keep the object even if its next-link is unreadable; the break below
+        // then stops the walk (partial data beats dropping a visible object).
         out.push_back(std::move(o));
         ++n;
 
