@@ -1,0 +1,4 @@
+build/
+libx3ui.so
+test_so.so
+*.o
