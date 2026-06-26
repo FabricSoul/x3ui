@@ -139,6 +139,13 @@ static void test_null_transform() {
     CHECK_EQ(v.objects[0].z, 0);
 }
 
+static void test_type_label() {
+    CHECK_STR(x3::type_label(5), "Ship");
+    CHECK_STR(x3::type_label(6), "Station");
+    CHECK_STR(x3::type_label(7), "Sector");
+    CHECK_STR(x3::type_label(99), "?");
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_two_objects);
@@ -146,5 +153,6 @@ int main() {
     RUN(test_cycle_is_capped);
     RUN(test_null_name);
     RUN(test_null_transform);
+    RUN(test_type_label);
     REPORT();
 }
