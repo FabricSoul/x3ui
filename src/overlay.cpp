@@ -690,42 +690,6 @@ static void map_panel(void)
     if (!ImGui::Begin("x3ui - sector map")) { ImGui::End(); return; }
     mem_open();
 
-    // ---- TEMP DIAGNOSTIC: settle "is *(scene+0x38) the sector or the ship?" ----
-    // Ghidra says it's the current SECTOR (type 7); the live walk showed ship
-    // cargo. Show the anchor, its parent chain (+0x54), and its first children so
-    // we can read the real runtime type/name values. Remove once resolved.
-    {
-        x3::Mem dm = make_engine_mem();
-        uint32_t scene = 0, anchor = 0;
-        dm.u32(0x0837a0d0u, scene);
-        if (scene) dm.u32(scene + 0x38, anchor);
-        ImGui::SeparatorText("DIAG (temp)");
-        ImGui::Text("scene=0x%08x  anchor *(scene+0x38)=0x%08x", scene, anchor);
-
-        uint32_t cur = anchor;
-        for (int lvl = 0; lvl < 5 && cur; ++lvl) {
-            uint32_t tw = 0, np = 0; int ty = -1; std::string nm;
-            if (dm.u32(cur + 0x48, tw)) ty = (int16_t)(tw & 0xFFFF);
-            if (dm.u32(cur + 0x0c, np) && np) nm = dm.cstr(np, 48);
-            ImGui::Text("  parent[%d] 0x%08x type=%d name='%s'", lvl, cur, ty, nm.c_str());
-            uint32_t p = 0;
-            if (!dm.u32(cur + 0x54, p)) break;
-            cur = p;
-        }
-
-        uint32_t payload = 0, node = 0;
-        if (anchor) dm.u32(anchor + 0x50, payload);
-        if (payload) dm.u32(payload + 0x00, node);
-        uint32_t sentinel = payload + 0x04;
-        for (int i = 0; i < 6 && node && node != sentinel; ++i) {
-            uint32_t tw = 0, np = 0; int ty = -1; std::string nm;
-            if (dm.u32(node + 0x48, tw)) ty = (int16_t)(tw & 0xFFFF);
-            if (dm.u32(node + 0x0c, np) && np) nm = dm.cstr(np, 48);
-            ImGui::Text("  child[%d] 0x%08x type=%d name='%s'", i, node, ty, nm.c_str());
-            uint32_t nx = 0; if (!dm.u32(node + 0x00, nx)) break; node = nx;
-        }
-    }
-
     // Throttle: re-walk at most ~6x/sec (cheap, but no need per-frame).
     static x3::SectorView view;
     static double last = -1.0;
@@ -745,31 +709,33 @@ static void map_panel(void)
                 view.sector_name.empty() ? "(unnamed)" : view.sector_name.c_str(),
                 view.sector_addr, view.objects.size());
 
-    static int filter = 0; // 0 = all, else a type id
-    ImGui::RadioButton("all", &filter, 0);      ImGui::SameLine();
-    ImGui::RadioButton("ships", &filter, 5);    ImGui::SameLine();
-    ImGui::RadioButton("stations", &filter, 6);
+    // Filter categories: 0 = all, 1 = ships (type 7), 2 = stations (type 5/6).
+    static int filter = 0;
+    ImGui::RadioButton("all", &filter, 0);       ImGui::SameLine();
+    ImGui::RadioButton("ships", &filter, 1);     ImGui::SameLine();
+    ImGui::RadioButton("stations", &filter, 2);
 
-    if (ImGui::BeginTable("objs", 5,
+    if (ImGui::BeginTable("objs", 4,
             ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
             ImGuiTableFlags_RowBg, ImVec2(0, 320))) {
         ImGui::TableSetupColumn("id");
         ImGui::TableSetupColumn("type");
         ImGui::TableSetupColumn("name");
-        ImGui::TableSetupColumn("pos (int)");
-        ImGui::TableSetupColumn("pos (float)");
+        ImGui::TableSetupColumn("pos (km)");
         ImGui::TableHeadersRow();
         for (const auto& o : view.objects) {
-            if (filter != 0 && o.type != filter) continue;
-            float fx, fy, fz;
-            memcpy(&fx, &o.x, 4); memcpy(&fy, &o.y, 4); memcpy(&fz, &o.z, 4);
+            bool is_ship    = (o.type == x3::off::TYPE_SHIP);
+            bool is_station = (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY);
+            if (filter == 1 && !is_ship)    continue;
+            if (filter == 2 && !is_station) continue;
             ImGui::TableNextRow();
             ImGui::TableNextColumn(); ImGui::Text("%u", o.id);
             ImGui::TableNextColumn(); ImGui::Text("%s(%d)", x3::type_label(o.type), o.type);
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(o.name.empty() ? "(unnamed)" : o.name.c_str());
-            ImGui::TableNextColumn(); ImGui::Text("%d,%d,%d", o.x, o.y, o.z);
-            ImGui::TableNextColumn(); ImGui::Text("%.0f,%.0f,%.0f", fx, fy, fz);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.1f, %.1f, %.1f", o.x / x3::off::UNITS_PER_KM,
+                        o.y / x3::off::UNITS_PER_KM, o.z / x3::off::UNITS_PER_KM);
         }
         ImGui::EndTable();
     }
@@ -857,10 +823,13 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
 // ---- interposed: event-queue pump ----------------------------------------
 // X3 reads input by PEEK-ing the queue (SDL_PeepEvents action=PEEK) and acting
 // on it, only GET-ing afterwards to clear it — so filtering GET events is too
-// late. Here, right after the real pump fills the queue, we drain keyboard+mouse
-// out of it while the overlay is up, routing them to ImGui. The game's later
-// PEEK then finds nothing. ScrollLock still toggles. When the overlay is hidden
-// we touch nothing, so the game keeps all its input exactly as before.
+// late. Right after the real pump fills the queue we pull keyboard+mouse out of
+// it, hand them all to ImGui, and RE-INJECT the events the game should still get:
+//   - mouse: kept for the game UNLESS ImGui wants it (cursor over an overlay window)
+//   - keyboard: kept for the game (so hotkeys still work) UNLESS ImGui is capturing
+//     text (a focused overlay input box); ScrollLock is always consumed as the toggle.
+// So clicking/scrolling on the overlay is swallowed, but clicking the game world
+// and game hotkeys pass straight through. When hidden we touch nothing.
 X3UI_EXPORT void SDL_PumpEvents(void)
 {
     resolve_originals();
@@ -869,10 +838,25 @@ X3UI_EXPORT void SDL_PumpEvents(void)
     if (!is_game_process() || !g_inited || !g_ui_visible || !real_PeepEvents)
         return;
 
+    ImGuiIO &io = ImGui::GetIO();
     SDL_Event buf[64];
+    std::vector<SDL_Event> give_back;   // events the game should still receive
 
-    // Keyboard incl. text input (0x300..0x303). Catch the ScrollLock toggle here.
-    for (int guard = 0; guard < 32; ++guard) {
+    // Mouse (0x400..0x403): ImGui sees all of it (to know whether it's hovered);
+    // the game keeps what ImGui isn't capturing (cursor not over an overlay window).
+    for (int guard = 0; guard < 64; ++guard) {
+        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i) {
+            ImGui_ImplSDL2_ProcessEvent(&buf[i]);
+            if (!io.WantCaptureMouse)
+                give_back.push_back(buf[i]);
+        }
+        if (n < 64) break;
+    }
+    // Keyboard incl. text (0x300..0x303): ScrollLock toggles; while an overlay text
+    // box is focused ImGui captures keys, otherwise hotkeys go to the game.
+    for (int guard = 0; guard < 64; ++guard) {
         int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_KEYDOWN, SDL_TEXTINPUT);
         if (n <= 0) break;
         for (int i = 0; i < n; ++i) {
@@ -882,18 +866,16 @@ X3UI_EXPORT void SDL_PumpEvents(void)
                 fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
                 continue;
             }
-            ImGui_ImplSDL2_ProcessEvent(&e);
+            if (io.WantCaptureKeyboard)
+                ImGui_ImplSDL2_ProcessEvent(&e);   // typing in an overlay field
+            else
+                give_back.push_back(e);            // hotkey -> game
         }
         if (n < 64) break;
     }
-    // Mouse motion / buttons / wheel (0x400..0x403).
-    for (int guard = 0; guard < 32; ++guard) {
-        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
-        if (n <= 0) break;
-        for (int i = 0; i < n; ++i)
-            ImGui_ImplSDL2_ProcessEvent(&buf[i]);
-        if (n < 64) break;
-    }
+
+    for (auto &e : give_back)
+        SDL_PushEvent(&e);
 }
 
 // ---- interposed: event pump ----------------------------------------------
@@ -911,31 +893,22 @@ X3UI_EXPORT int SDL_PeepEvents(SDL_Event *events, int numevents,
     for (int i = 0; i < n; ++i) {
         SDL_Event &e = events[i];
 
-        // ScrollLock toggles the overlay (X3 doesn't use it for gameplay);
-        // consume it so the game never sees the key.
+        // ScrollLock toggles the overlay; consume it so the game never sees it.
+        // When the overlay is visible, SDL_PumpEvents already handled the toggle
+        // and all input routing; this mainly catches the hidden -> show press.
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_SCROLLLOCK) {
             g_ui_visible = !g_ui_visible;
             fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
             continue;
         }
 
-        ImGui_ImplSDL2_ProcessEvent(&e);
+        // ImGui needs window events (resize/focus) for its display size. Input
+        // (keyboard/mouse) is already routed in SDL_PumpEvents — don't re-process
+        // it here, or re-injected events would be double-counted.
+        if (e.type == SDL_WINDOWEVENT)
+            ImGui_ImplSDL2_ProcessEvent(&e);
 
-        // While the overlay is up it is MODAL: ImGui receives the input above,
-        // and the game sees NO input events. X3 reads input through the event
-        // queue (not by polling key/mouse state), so dropping these events fully
-        // blocks game input. Non-input events (quit, window resize, focus, etc.)
-        // still pass through so the game keeps working normally.
-        bool input_event =
-            e.type == SDL_KEYDOWN     || e.type == SDL_KEYUP        ||
-            e.type == SDL_TEXTINPUT   || e.type == SDL_TEXTEDITING  ||
-            e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN ||
-            e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEWHEEL;
-
-        if (g_ui_visible && input_event)
-            continue;             // swallow: game gets no input while overlay is open
-
-        events[kept++] = e;       // compact kept events back into the buffer
+        events[kept++] = e;       // pass everything through to the game
     }
     return kept;
 }

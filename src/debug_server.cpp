@@ -139,15 +139,25 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         return std::string(b) + body;
     }
     if (op == "scene") {
-        uint32_t scene = 0, anchor = 0, tw = 0, np = 0; std::string nm;
+        uint32_t scene = 0, player = 0, sector = 0, ptw = 0, stw = 0, np = 0, ns = 0;
+        std::string pn, sn;
         u32(0x0837a0d0u, scene);
-        if (scene) u32(scene + off::SCENE_PLAYER_ANCHOR, anchor);
-        if (anchor) {
-            u32(anchor + off::OBJ_TYPE, tw);
-            if (u32(anchor + off::OBJ_NAME, np) && np && mem.cstr) nm = mem.cstr(np, 48);
+        if (scene) {
+            u32(scene + off::SCENE_PLAYER_ANCHOR, player);
+            u32(scene + off::SCENE_SECTOR, sector);
         }
-        snprintf(b, sizeof b, "ok scene=0x%08x anchor=0x%08x type=%d name=\"%s\"",
-                 scene, anchor, i16lo(tw), nm.c_str());
+        if (player) {
+            u32(player + off::OBJ_TYPE, ptw);
+            if (u32(player + off::OBJ_NAME, np) && np && mem.cstr) pn = mem.cstr(np, 48);
+        }
+        if (sector) {
+            u32(sector + off::OBJ_TYPE, stw);
+            if (u32(sector + off::OBJ_NAME, ns) && ns && mem.cstr) sn = mem.cstr(ns, 48);
+        }
+        snprintf(b, sizeof b,
+                 "ok scene=0x%08x player=0x%08x ptype=%d pname=\"%s\" "
+                 "sector=0x%08x stype=%d sname=\"%s\"",
+                 scene, player, i16lo(ptw), pn.c_str(), sector, i16lo(stw), sn.c_str());
         return b;
     }
     if (op == "sector") {

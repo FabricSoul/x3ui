@@ -61,18 +61,24 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     uint32_t scene = 0;
     if (!ru32(mem, scene_global, scene) || !scene) return v;
 
-    uint32_t anchor = 0;
-    if (!ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, anchor) || !anchor) return v;
+    // Primary: the current sector hangs directly off the scene at +0x08 (type 1).
+    uint32_t sector = 0, cand = 0;
+    if (ru32(mem, scene + off::SCENE_SECTOR, cand) && cand &&
+        read_type(mem, cand) == off::TYPE_SECTOR)
+        sector = cand;
 
-    int16_t t = read_type(mem, anchor);
-    uint32_t sector = 0;
-    if (t == off::TYPE_SECTOR) {
-        sector = anchor;                              // anchor IS the sector
-    } else if (t == off::TYPE_SHIP || t == off::TYPE_STATION) {
-        uint32_t parent = 0;                          // anchor is player obj; sector is its container
-        if (ru32(mem, anchor + off::OBJ_PARENT, parent) && parent &&
-            read_type(mem, parent) == off::TYPE_SECTOR)
-            sector = parent;
+    // Fallback: climb the player ship's container chain (+0x54) up to the sector
+    // (handles e.g. ship -> docked station -> sector).
+    if (!sector) {
+        uint32_t cur = 0;
+        if (ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, cur)) {
+            for (int k = 0; k < 8 && cur; ++k) {
+                if (read_type(mem, cur) == off::TYPE_SECTOR) { sector = cur; break; }
+                uint32_t parent = 0;
+                if (!ru32(mem, cur + off::OBJ_PARENT, parent)) break;
+                cur = parent;
+            }
+        }
     }
     if (!sector) return v;
 
@@ -87,10 +93,16 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
 
 const char* type_label(int16_t type) {
     switch (type) {
-        case off::TYPE_SHIP:    return "Ship";
-        case off::TYPE_STATION: return "Station";
-        case off::TYPE_SECTOR:  return "Sector";
-        default:                return "?";
+        case off::TYPE_SECTOR:   return "Sector";
+        case off::TYPE_SUN:      return "Sun";
+        case off::TYPE_PLANET:   return "Planet";
+        case off::TYPE_STATION:  return "Station";
+        case off::TYPE_FACTORY:  return "Factory";
+        case off::TYPE_SHIP:     return "Ship";
+        case off::TYPE_WARE:     return "Ware";
+        case off::TYPE_ASTEROID: return "Asteroid";
+        case off::TYPE_GATE:     return "Gate";
+        default:                 return "?";
     }
 }
 

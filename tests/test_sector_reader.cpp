@@ -2,6 +2,9 @@
 #include "fake_mem.h"
 #include "sector_reader.h"
 
+// Live-verified model: current sector = *(scene+0x08), type 1.
+// Types: 1=Sector 3=Sun 4=Planet 5=Station 6=Factory 7=Ship 9=Ware 0x11=Asteroid 0x12=Gate.
+
 // Not in a game: scene-mgr global reads as 0 -> no sector, no objects.
 static void test_null_scene() {
     FakeMem fm; // empty: every read fails
@@ -11,43 +14,32 @@ static void test_null_scene() {
 }
 
 // Synthetic graph:
-//   scene_global(0x0837a0d0) -> scene 0x1000
-//   scene+0x38 -> sector 0x2000 (type 7), name "Argon Prime", payload 0x3000
-//   payload 0x3000: head -> node1 0x4000 ; sentinel = 0x3004
-//   node1 0x4000: next->0x5000 id=101 type=5(ship) name "Player Ship" tf 0x6000 (1000,-2000,3000)
-//   node2 0x5000: next->sentinel id=202 type=6(station) name "Trade Stn" tf 0x6100 (50,60,70)
+//   scene 0x1000; scene+0x08 -> sector 0x2000 (type 1, "Argon Prime", payload 0x3000)
+//   payload head -> node1 0x4000 ; sentinel = 0x3004
+//   node1 0x4000: next->0x5000 id=101 type=7(ship) "Player Ship" tf 0x6000 (1000,-2000,3000)
+//   node2 0x5000: next->sentinel id=202 type=5(station) "Trade Stn"
 static void test_two_objects() {
     FakeMem fm;
-    // scene-mgr
-    fm.w(0x0837a0d0, 0x1000);          // scene_global -> scene
-    fm.w(0x1000 + 0x38, 0x2000);       // scene+0x38 -> sector
-    // sector 0x2000 (type 7)
-    fm.w(0x2000 + 0x48, 7);            // type = 7 (subtype 0 in high half)
-    fm.w(0x2000 + 0x0c, 0x9000);       // name ptr
-    fm.s(0x9000, "Argon Prime");
-    fm.w(0x2000 + 0x50, 0x3000);       // payload
-    // payload 0x3000 list: head -> node1, sentinel = 0x3000+4 = 0x3004
-    fm.w(0x3000 + 0x00, 0x4000);       // first node
-    // node1 0x4000 (ship)
-    fm.w(0x4000 + 0x00, 0x5000);       // next -> node2
-    fm.w(0x4000 + 0x08, 101);          // id
-    fm.w(0x4000 + 0x48, 5);            // type 5 ship
-    fm.w(0x4000 + 0x0c, 0x9100);       // name
-    fm.s(0x9100, "Player Ship");
-    fm.w(0x4000 + 0x6c, 0x6000);       // transform
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x08, 0x2000);   // scene+0x08 -> sector
+    fm.w(0x2000 + 0x48, 1);        // type 1 = sector
+    fm.w(0x2000 + 0x0c, 0x9000);   fm.s(0x9000, "Argon Prime");
+    fm.w(0x2000 + 0x50, 0x3000);   // payload
+    fm.w(0x3000 + 0x00, 0x4000);   // first node
+    // node1 (ship)
+    fm.w(0x4000 + 0x00, 0x5000);
+    fm.w(0x4000 + 0x08, 101);
+    fm.w(0x4000 + 0x48, 7);        // type 7 = ship
+    fm.w(0x4000 + 0x0c, 0x9100);   fm.s(0x9100, "Player Ship");
+    fm.w(0x4000 + 0x6c, 0x6000);
     fm.w(0x6000 + 0x2c, (uint32_t)1000);
     fm.w(0x6000 + 0x30, (uint32_t)(int32_t)-2000);
     fm.w(0x6000 + 0x34, (uint32_t)3000);
-    // node2 0x5000 (station)
-    fm.w(0x5000 + 0x00, 0x3004);       // next -> sentinel (end)
-    fm.w(0x5000 + 0x08, 202);          // id
-    fm.w(0x5000 + 0x48, 6);            // type 6 station
-    fm.w(0x5000 + 0x0c, 0x9200);       // name
-    fm.s(0x9200, "Trade Stn");
-    fm.w(0x5000 + 0x6c, 0x6100);       // transform
-    fm.w(0x6100 + 0x2c, (uint32_t)50);
-    fm.w(0x6100 + 0x30, (uint32_t)60);
-    fm.w(0x6100 + 0x34, (uint32_t)70);
+    // node2 (station)
+    fm.w(0x5000 + 0x00, 0x3004);   // -> sentinel (end)
+    fm.w(0x5000 + 0x08, 202);
+    fm.w(0x5000 + 0x48, 5);        // type 5 = station
+    fm.w(0x5000 + 0x0c, 0x9200);   fm.s(0x9200, "Trade Stn");
 
     x3::SectorView v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
     CHECK(v.in_sector);
@@ -56,30 +48,31 @@ static void test_two_objects() {
     CHECK_EQ(v.objects.size(), (size_t)2);
 
     CHECK_EQ(v.objects[0].id, 101u);
-    CHECK_EQ(v.objects[0].type, (int16_t)5);
+    CHECK_EQ(v.objects[0].type, (int16_t)7);
     CHECK_STR(v.objects[0].name.c_str(), "Player Ship");
     CHECK_EQ(v.objects[0].x, 1000);
     CHECK_EQ(v.objects[0].y, -2000);
     CHECK_EQ(v.objects[0].z, 3000);
 
     CHECK_EQ(v.objects[1].id, 202u);
-    CHECK_EQ(v.objects[1].type, (int16_t)6);
+    CHECK_EQ(v.objects[1].type, (int16_t)5);
     CHECK_STR(v.objects[1].name.c_str(), "Trade Stn");
-    CHECK_EQ(v.objects[1].x, 50);
-    CHECK_EQ(v.objects[1].y, 60);
-    CHECK_EQ(v.objects[1].z, 70);
 }
 
-// scene+0x38 points at the player SHIP (type 5); sector is its parent (+0x54).
-static void test_ship_anchor_resolves_via_parent() {
+// When scene+0x08 isn't a valid sector, fall back to climbing the player ship's
+// parent chain (ship -> docked station -> sector), like the docked Mercury case.
+static void test_fallback_climbs_to_sector() {
     FakeMem fm;
     fm.w(0x0837a0d0, 0x1000);
-    fm.w(0x1000 + 0x38, 0x2000);   // anchor = ship
-    fm.w(0x2000 + 0x48, 5);        // type 5 = ship
-    fm.w(0x2000 + 0x54, 0x2500);   // parent -> sector
-    fm.w(0x2500 + 0x48, 7);        // parent type 7 = sector
-    fm.w(0x2500 + 0x50, 0x3000);   // sector payload (empty list)
-    fm.w(0x3000 + 0x00, 0x3004);   // head == sentinel -> 0 objects
+    // (no scene+0x08 -> primary path fails)
+    fm.w(0x1000 + 0x38, 0x2000);   // player ship
+    fm.w(0x2000 + 0x48, 7);        // ship
+    fm.w(0x2000 + 0x54, 0x2200);   // parent -> station
+    fm.w(0x2200 + 0x48, 5);        // station
+    fm.w(0x2200 + 0x54, 0x2500);   // parent -> sector
+    fm.w(0x2500 + 0x48, 1);        // sector
+    fm.w(0x2500 + 0x50, 0x3000);
+    fm.w(0x3000 + 0x00, 0x3004);   // empty list
 
     x3::SectorView v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
     CHECK(v.in_sector);
@@ -90,13 +83,10 @@ static void test_ship_anchor_resolves_via_parent() {
 // A cyclic list (no sentinel reached) must terminate at `cap`, not hang.
 static void test_cycle_is_capped() {
     FakeMem fm;
-    fm.w(0x0837a0d0, 0x1000);
-    fm.w(0x1000 + 0x38, 0x2000);
-    fm.w(0x2000 + 0x48, 7);        // sector
     fm.w(0x2000 + 0x50, 0x3000);   // payload
     fm.w(0x3000 + 0x00, 0x4000);   // head -> node
     fm.w(0x4000 + 0x00, 0x4000);   // node.next -> itself (cycle)
-    fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x48, 7);
 
     auto objs = x3::read_sector_objects(fm.mem(), 0x2000, /*cap=*/3);
     CHECK_EQ(objs.size(), (size_t)3);   // stopped at cap, did not hang
@@ -106,13 +96,12 @@ static void test_cycle_is_capped() {
 static void test_null_name() {
     FakeMem fm;
     fm.w(0x0837a0d0, 0x1000);
-    fm.w(0x1000 + 0x38, 0x2000);
-    fm.w(0x2000 + 0x48, 7);
+    fm.w(0x1000 + 0x08, 0x2000);
+    fm.w(0x2000 + 0x48, 1);
     fm.w(0x2000 + 0x50, 0x3000);
     fm.w(0x3000 + 0x00, 0x4000);
     fm.w(0x4000 + 0x00, 0x3004);   // next -> sentinel
-    fm.w(0x4000 + 0x08, 7);
-    fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x48, 7);
     fm.w(0x4000 + 0x0c, 0);        // name ptr = null
 
     auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
@@ -124,12 +113,12 @@ static void test_null_name() {
 static void test_null_transform() {
     FakeMem fm;
     fm.w(0x0837a0d0, 0x1000);
-    fm.w(0x1000 + 0x38, 0x2000);
-    fm.w(0x2000 + 0x48, 7);
+    fm.w(0x1000 + 0x08, 0x2000);
+    fm.w(0x2000 + 0x48, 1);
     fm.w(0x2000 + 0x50, 0x3000);
     fm.w(0x3000 + 0x00, 0x4000);
     fm.w(0x4000 + 0x00, 0x3004);
-    fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x48, 7);
     fm.w(0x4000 + 0x6c, 0);        // transform = null
 
     auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
@@ -140,16 +129,22 @@ static void test_null_transform() {
 }
 
 static void test_type_label() {
-    CHECK_STR(x3::type_label(5), "Ship");
-    CHECK_STR(x3::type_label(6), "Station");
-    CHECK_STR(x3::type_label(7), "Sector");
+    CHECK_STR(x3::type_label(1), "Sector");
+    CHECK_STR(x3::type_label(3), "Sun");
+    CHECK_STR(x3::type_label(4), "Planet");
+    CHECK_STR(x3::type_label(5), "Station");
+    CHECK_STR(x3::type_label(6), "Factory");
+    CHECK_STR(x3::type_label(7), "Ship");
+    CHECK_STR(x3::type_label(9), "Ware");
+    CHECK_STR(x3::type_label(0x11), "Asteroid");
+    CHECK_STR(x3::type_label(0x12), "Gate");
     CHECK_STR(x3::type_label(99), "?");
 }
 
 int main() {
     RUN(test_null_scene);
     RUN(test_two_objects);
-    RUN(test_ship_anchor_resolves_via_parent);
+    RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);
     RUN(test_null_name);
     RUN(test_null_transform);

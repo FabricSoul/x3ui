@@ -8,8 +8,9 @@ namespace x3 { namespace off {
 // Global that holds the scene-manager pointer.
 constexpr uint32_t SCENE_GLOBAL          = 0x0837a0d0u;
 
-// scene-mgr fields
-constexpr uint32_t SCENE_PLAYER_ANCHOR   = 0x38; // -> player sector (type 7) OR player ship
+// scene-mgr fields (live-verified)
+constexpr uint32_t SCENE_SECTOR        = 0x08; // -> current sector object (type 1)
+constexpr uint32_t SCENE_PLAYER_ANCHOR = 0x38; // -> player ship object (type 7)
 
 // object header
 constexpr uint32_t OBJ_NEXT      = 0x00;
@@ -31,9 +32,18 @@ constexpr uint32_t TF_X = 0x2c;
 constexpr uint32_t TF_Y = 0x30;
 constexpr uint32_t TF_Z = 0x34;
 
-// type ids (object +0x48)
-constexpr int16_t TYPE_SHIP    = 5;
-constexpr int16_t TYPE_STATION = 6;
-constexpr int16_t TYPE_SECTOR  = 7;
+// type ids at object +0x48 (live-verified against the running game)
+constexpr int16_t TYPE_SECTOR   = 1;
+constexpr int16_t TYPE_SUN      = 3;
+constexpr int16_t TYPE_PLANET   = 4;
+constexpr int16_t TYPE_STATION  = 5;     // docks / trading stations
+constexpr int16_t TYPE_FACTORY  = 6;     // production complexes (also a "station")
+constexpr int16_t TYPE_SHIP     = 7;
+constexpr int16_t TYPE_WARE     = 9;     // installed equipment/ware (e.g. shields)
+constexpr int16_t TYPE_ASTEROID = 0x11;
+constexpr int16_t TYPE_GATE     = 0x12;
+
+// Position units: 1 km = 500000 raw units (object transform x/y/z).
+constexpr float   UNITS_PER_KM  = 500000.0f;
 
 }} // namespace x3::off
