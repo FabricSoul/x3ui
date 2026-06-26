@@ -70,8 +70,81 @@ static void test_two_objects() {
     CHECK_EQ(v.objects[1].z, 70);
 }
 
+// scene+0x38 points at the player SHIP (type 5); sector is its parent (+0x54).
+static void test_ship_anchor_resolves_via_parent() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x38, 0x2000);   // anchor = ship
+    fm.w(0x2000 + 0x48, 5);        // type 5 = ship
+    fm.w(0x2000 + 0x54, 0x2500);   // parent -> sector
+    fm.w(0x2500 + 0x48, 7);        // parent type 7 = sector
+    fm.w(0x2500 + 0x50, 0x3000);   // sector payload (empty list)
+    fm.w(0x3000 + 0x00, 0x3004);   // head == sentinel -> 0 objects
+
+    x3::SectorView v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK(v.in_sector);
+    CHECK_EQ(v.sector_addr, 0x2500u);
+    CHECK(v.objects.empty());
+}
+
+// A cyclic list (no sentinel reached) must terminate at `cap`, not hang.
+static void test_cycle_is_capped() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x38, 0x2000);
+    fm.w(0x2000 + 0x48, 7);        // sector
+    fm.w(0x2000 + 0x50, 0x3000);   // payload
+    fm.w(0x3000 + 0x00, 0x4000);   // head -> node
+    fm.w(0x4000 + 0x00, 0x4000);   // node.next -> itself (cycle)
+    fm.w(0x4000 + 0x48, 5);
+
+    auto objs = x3::read_sector_objects(fm.mem(), 0x2000, /*cap=*/3);
+    CHECK_EQ(objs.size(), (size_t)3);   // stopped at cap, did not hang
+}
+
+// Null name pointer -> empty name (no crash).
+static void test_null_name() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x38, 0x2000);
+    fm.w(0x2000 + 0x48, 7);
+    fm.w(0x2000 + 0x50, 0x3000);
+    fm.w(0x3000 + 0x00, 0x4000);
+    fm.w(0x4000 + 0x00, 0x3004);   // next -> sentinel
+    fm.w(0x4000 + 0x08, 7);
+    fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x0c, 0);        // name ptr = null
+
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK_EQ(v.objects.size(), (size_t)1);
+    CHECK(v.objects[0].name.empty());
+}
+
+// Null transform pointer -> position stays 0 (no crash).
+static void test_null_transform() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x38, 0x2000);
+    fm.w(0x2000 + 0x48, 7);
+    fm.w(0x2000 + 0x50, 0x3000);
+    fm.w(0x3000 + 0x00, 0x4000);
+    fm.w(0x4000 + 0x00, 0x3004);
+    fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x6c, 0);        // transform = null
+
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK_EQ(v.objects.size(), (size_t)1);
+    CHECK_EQ(v.objects[0].x, 0);
+    CHECK_EQ(v.objects[0].y, 0);
+    CHECK_EQ(v.objects[0].z, 0);
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_two_objects);
+    RUN(test_ship_anchor_resolves_via_parent);
+    RUN(test_cycle_is_capped);
+    RUN(test_null_name);
+    RUN(test_null_transform);
     REPORT();
 }
