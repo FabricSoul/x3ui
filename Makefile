@@ -36,7 +36,11 @@ all: $(TARGET)
 
 $(BUILD)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (-MMD): a header change recompiles its dependents,
+# so we never link a stale object (which once left an undefined-symbol .so).
+-include $(OBJ:.o=.d)
 
 $(TARGET): $(OBJ)
 	$(CXX) $(OBJ) $(LDFLAGS) -o $@
