@@ -1189,21 +1189,29 @@ struct HullCache {
     bool         ok        = false;
 };
 static std::unordered_map<uint32_t, HullCache> g_hulls;   // key = object address
-static int g_map_lod = 3;                                 // hull detail in the map
+static int g_map_lod = 0;   // coarsen bias added to the auto distance LOD (0 = full detail)
 
-// Ensure object `addr` (root model `mid`) has a cached hull at the current map LOD.
-// Reads at most when missing/stale; returns nullptr if it has no resolvable mesh.
-// `budget` is decremented on an actual (expensive) read; pass a per-frame counter.
-static HullCache* hull_ensure(uint32_t addr, uint32_t mid, int& budget) {
+// Pick a model LOD from the hull's apparent screen radius: bigger -> finer (lower).
+static int lod_for_rpx(float rpx) {
+    if (rpx >= 90.0f) return 0;     // filling the view -> finest
+    if (rpx >= 45.0f) return 1;
+    if (rpx >= 20.0f) return 2;
+    return 3;                       // small-but-still-a-hull -> coarse
+}
+
+// Ensure object `addr` (root model `mid`) has a cached hull at `want_lod`. Reads only
+// when missing/stale; returns nullptr if it has no resolvable mesh (or budget spent and
+// nothing cached yet). `budget` is decremented per actual (expensive) read.
+static HullCache* hull_ensure(uint32_t addr, uint32_t mid, int want_lod, int& budget) {
     auto it = g_hulls.find(addr);
-    if (it != g_hulls.end() && it->second.lod == g_map_lod && it->second.model_id == mid)
+    if (it != g_hulls.end() && it->second.lod == want_lod && it->second.model_id == mid)
         return it->second.ok ? &it->second : nullptr;
     if (budget <= 0) return (it != g_hulls.end() && it->second.ok) ? &it->second : nullptr;
     --budget;
     HullCache hc;
-    hc.model_id = mid; hc.lod = g_map_lod;
+    hc.model_id = mid; hc.lod = want_lod;
     x3::Mem mem = make_engine_mem();
-    x3::MeshWire w = x3::read_object_wireframe(mem, addr, 512, 200000, 600000, g_map_lod, 1000);
+    x3::MeshWire w = x3::read_object_wireframe(mem, addr, 512, 200000, 600000, want_lod, 1000);
     if (w.ok && !w.tris.empty()) {
         // Un-rotate world-oriented geometry into body frame by R_read^T (root+0x3c).
         uint32_t root = 0; float R[9] = {1,0,0, 0,1,0, 0,0,1};
@@ -1260,6 +1268,7 @@ static void map3d_panel(void)
             if (o.addr == g_sel_addr) { g_sel_alive = true; break; }
 
     static Camera3D cam;
+    static uint32_t focus_addr = 0;     // dbl-clicked object the look-at center tracks (0 = none)
 
     static int map3d_rel = 0, map3d_type = 0;   // independent of the table's filter
     map_filter_bar(&map3d_rel, &map3d_type);
@@ -1270,10 +1279,13 @@ static void map3d_panel(void)
     if (ImGui::Button("reset view")) {           // re-center + re-orient (e.g. after undocking)
         cam.tx = cam.ty = cam.tz = 0;
         cam.yaw = 0.7f; cam.pitch = 0.5f; cam.dist = 70.0f;
+        focus_addr = 0;
     }
-    ImGui::SameLine(); ImGui::TextDisabled("dbl-click focus · MMB pan");
+    ImGui::SameLine();
+    if (focus_addr) ImGui::TextDisabled("dbl-click focus · MMB pan · (tracking)");
+    else            ImGui::TextDisabled("dbl-click focus · MMB pan");
     ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-    ImGui::SliderInt("hull LOD", &g_map_lod, 0, 6);
+    ImGui::SliderInt("coarsen", &g_map_lod, 0, 4);   // 0 = full auto detail; higher = coarser/faster
     hull_gc(view.objects);
     int hull_budget = 2;                 // expensive geometry reads per frame
     meshgl::g_solids.clear();
@@ -1304,6 +1316,7 @@ static void map3d_panel(void)
             cam.ty += ( d.y*uy) * sc;
             cam.tz += (-d.x*rz + d.y*uz) * sc;
             cam.cx = cam.tx; cam.cy = cam.ty; cam.cz = cam.tz;  // no lerp lag while panning
+            focus_addr = 0;                                     // manual pan drops focus-tracking
         } else if (!follow) {                                   // left-drag orbits
             cam.yaw -= d.x * 0.008f;
             cam.pitch += d.y * 0.008f;
@@ -1323,6 +1336,20 @@ static void map3d_panel(void)
         // min 0.1 km so small ships (~0.05 km) can fill the view: rpx = ext/depth*focal
         // (above the 0.02 km GPU near-plane / 0.05 km projection cutoff).
         cam.dist = cam.dist < 0.1f ? 0.1f : (cam.dist > 600.0f ? 600.0f : cam.dist);
+    }
+    // Focus-tracking: keep the look-at target on the dbl-clicked object as it moves
+    // (the lerp below smooths the chase). Drop it if the object left the sector.
+    if (focus_addr) {
+        const x3::ObjInfo* fo = nullptr;
+        for (const auto& o : view.objects) if (o.addr == focus_addr) { fo = &o; break; }
+        if (fo) {
+            const float Uf = x3::off::UNITS_PER_KM;
+            cam.tx =  (fo->x - view.player_x) / Uf;
+            cam.ty = -(fo->y - view.player_y) / Uf;   // match KX/KY/KZ screen convention
+            cam.tz = -(fo->z - view.player_z) / Uf;
+        } else {
+            focus_addr = 0;
+        }
     }
     // Ease the look-at center toward its target (frame-rate independent lerp).
     {
@@ -1418,12 +1445,20 @@ static void map3d_panel(void)
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; e.hull = nullptr; e.rpx = 0; float gd;
         e.gok = PROJ(KX(o.x), 0, KZ(o.z), e.ground, gd);
-        // promote to a hull when big enough on screen and it has a resolvable mesh
-        uint32_t root = 0, mid = 0;
+        // Promote to a hull when big enough on screen. The cheap +0x6c size scalar is a
+        // pre-read extent estimate (~= true extent for these models), so distant dot-only
+        // objects are never read; LOD is chosen from apparent size (finer when zoomed in).
+        uint32_t root = 0, mid = 0, sz = 0;
         if (x3::read_object_root(emem, o.addr, root)) {
             emem.u32(root + 0x12c, mid);
-            HullCache* hc = hull_ensure(o.addr, mid, hull_budget);
-            if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
+            emem.u32(root + 0x6c, sz);
+            float est_rpx = ((float)sz / U) / d * focal;
+            if (est_rpx > 6.0f) {
+                int want = lod_for_rpx(est_rpx) + g_map_lod;
+                want = want < 0 ? 0 : (want > 6 ? 6 : want);
+                HullCache* hc = hull_ensure(o.addr, mid, want, hull_budget);
+                if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
+            }
         }
         ps.push_back(e);
     }
