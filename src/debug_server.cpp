@@ -243,8 +243,13 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         int i = 0;
         for (const auto &o : v.objects) {
             if (i++ >= 256) break;
-            snprintf(b, sizeof b, "\n  id=%u type=%d sub=%d name=\"%s\" pos=%d,%d,%d dist=%d",
-                     o.id, (int)o.type, (int)o.subtype, o.name.c_str(), o.x, o.y, o.z, o.dist);
+            uint32_t f40 = 0, f44 = 0;
+            u32(o.addr + off::OBJ_FLAGS, f40);
+            u32(o.addr + off::OBJ_FLAGS2, f44);
+            snprintf(b, sizeof b,
+                     "\n  id=%u type=%d sub=%d rel=%d f40=0x%08x f44=0x%08x name=\"%s\" dist=%d",
+                     o.id, (int)o.type, (int)o.subtype, (int)o.relation, f40, f44,
+                     o.name.c_str(), o.dist);
             r += b;
         }
         return r;
