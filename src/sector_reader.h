@@ -103,8 +103,21 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj_addr, bool coarsest = 
 // reading each mesh-bearing node at finest LOD and (Task 3) composing transforms.
 // Pure reads + bounded (node_cap / vcap / ecap). Proxy and unloaded nodes are
 // skipped. Returns {ok=false} if no part resolved.
+// Optional instrumentation for read_object_wireframe (diagnostics only).
+struct ObjWireStats {
+    size_t nodes = 0;          // scene-graph nodes visited
+    size_t resolved = 0;       // nodes whose mesh resolved (read_node_mesh ok)
+    size_t kept = 0;           // parts appended to the output
+    size_t dropped_guard = 0;  // parts dropped by the finiteness/magnitude guard
+    size_t sum_resolved_v = 0; // total verts across all resolved parts (pre-guard)
+    float  max_coord = 0.0f;   // largest |coord| any transform produced
+};
+// lod_level: 0 = finest detail (slow), higher = coarser (clamped per model, faster).
+// min_model_id: skip drawing nodes whose model id is below this (1000 in-game drops
+// the built-in primitive proxies — box/cone collision & nav stand-ins; 0 = draw all).
 MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
                                size_t node_cap = 512, size_t vcap = 200000,
-                               size_t ecap = 600000);
+                               size_t ecap = 600000, int lod_level = 0,
+                               uint32_t min_model_id = 0, ObjWireStats* stats = nullptr);
 
 } // namespace x3

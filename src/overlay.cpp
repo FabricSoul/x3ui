@@ -1207,6 +1207,7 @@ static void map3d_panel(void)
 // ---- mesh preview: wireframe of the selected object, read from CPU model data
 // and drawn with our own projection (no engine render calls, no GL state). ------
 static float g_mesh_yaw = 0.7f, g_mesh_pitch = 0.3f, g_mesh_dist = 3.2f;
+static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
 
 static void mesh_preview_panel(void)
 {
@@ -1215,11 +1216,12 @@ static void mesh_preview_panel(void)
 
     // Re-read geometry only when the selection changes (it's static per object).
     static uint32_t cached = 0;
+    static int      cached_lod = -1;
     static x3::MeshWire wire;
     static float cx = 0, cy = 0, cz = 0, extent = 1;
-    if (g_sel_addr && g_sel_alive && g_sel_addr != cached) {
-        wire = x3::read_object_wireframe(make_engine_mem(), g_sel_addr);
-        cached = g_sel_addr;
+    if (g_sel_addr && g_sel_alive && (g_sel_addr != cached || g_mesh_lod != cached_lod)) {
+        wire = x3::read_object_wireframe(make_engine_mem(), g_sel_addr, 512, 200000, 600000, g_mesh_lod, 1000);
+        cached = g_sel_addr; cached_lod = g_mesh_lod;
         if (wire.ok) {
             float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
             for (size_t i = 0; i + 2 < wire.verts.size(); i += 3)
@@ -1239,7 +1241,8 @@ static void mesh_preview_panel(void)
     static bool spin = true;
     ImGui::Text("#%u   %zu verts  %zu tris", g_sel_id, wire.vcount(), wire.edges.size() / 6);
     ImGui::SameLine(); ImGui::Checkbox("spin", &spin);
-    ImGui::SameLine(); ImGui::TextDisabled("drag orbit · wheel zoom");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(70); ImGui::SliderInt("LOD", &g_mesh_lod, 0, 6);
+    ImGui::SameLine(); ImGui::TextDisabled("drag · wheel");
 
     ImVec2 av = ImGui::GetContentRegionAvail();
     if (av.x < 32 || av.y < 32) { ImGui::End(); return; }

@@ -117,12 +117,16 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         return b;
     }
 
-    if (op == "owire") {   // whole-object wireframe: owire <obj_addr>
+    if (op == "owire") {   // whole-object wireframe: owire <obj_addr> [lod]
         std::string at; is >> at;
         uint32_t a = parse_addr(at);
-        MeshWire w = read_object_wireframe(mem, a);
-        snprintf(b, sizeof b, "ok addr=0x%x | obj.ok=%d v=%zu tris=%zu",
-                 a, (int)w.ok, w.vcount(), w.edges.size() / 6);
+        int lod = 0; is >> lod;                  // optional LOD level (0 = finest)
+        ObjWireStats st;
+        MeshWire w = read_object_wireframe(mem, a, 512, 200000, 600000, lod, 1000, &st);
+        snprintf(b, sizeof b,
+                 "ok addr=0x%x ok=%d v=%zu tris=%zu | nodes=%zu resolved=%zu kept=%zu dropG=%zu sumv=%zu maxc=%.1f",
+                 a, (int)w.ok, w.vcount(), w.edges.size() / 6,
+                 st.nodes, st.resolved, st.kept, st.dropped_guard, st.sum_resolved_v, (double)st.max_coord);
         return b;
     }
 

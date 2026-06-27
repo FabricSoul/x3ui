@@ -20,8 +20,9 @@ std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id) {
     return mem.text ? mem.text(page, id) : std::string();
 }
 
-// LOD selection for one node's mesh.
-enum LodSel { LOD_NODE = 0, LOD_COARSEST = 1, LOD_FINEST = 2 };
+// LOD selection for one node's mesh. lodsel >= 0 is an absolute LOD level
+// (0 = finest, clamped to the model's coarsest); the negatives are special.
+enum LodSel { LOD_NODE = -2, LOD_COARSEST = -1 };
 
 // Read ONE node/object's mesh from resident CPU model data. `node` supplies the
 // model id (+0x12c) and (for LOD_NODE) the LOD index (+0x138). Pure reads, bounded.
@@ -44,9 +45,10 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
     uint32_t lodarr = 0, lodcnt = 0, lod = 0;
     if (!ru32(mem, model + 0xc, lodarr) || !lodarr) return w;
     ru32(mem, model + 0x10, lodcnt); lodcnt &= 0xFFFF;
-    if (lodsel == LOD_COARSEST)    lod = lodcnt ? lodcnt - 1 : 0;
-    else if (lodsel == LOD_FINEST) lod = 0;
-    else { if (!ru32(mem, node + 0x138, lod)) lod = 0;
+    if (lodsel == LOD_COARSEST)   lod = lodcnt ? lodcnt - 1 : 0;
+    else if (lodsel == LOD_NODE) { if (!ru32(mem, node + 0x138, lod)) lod = 0;
+                                   if (lodcnt && lod >= lodcnt) lod = lodcnt - 1; }
+    else { lod = lodsel < 0 ? 0u : (uint32_t)lodsel;          // absolute level (0 = finest)
            if (lodcnt && lod >= lodcnt) lod = lodcnt - 1; }
     uint32_t mesh = 0;
     if (!ru32(mem, lodarr + lod * 4, mesh) || !mesh) return w;
@@ -143,8 +145,10 @@ Mat34 node_local(const Mem& mem, uint32_t node) {
 } // namespace
 
 MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
-                               size_t node_cap, size_t vcap, size_t ecap) {
+                               size_t node_cap, size_t vcap, size_t ecap,
+                               int lod_level, uint32_t min_model_id, ObjWireStats* stats) {
     MeshWire out;
+    if (stats) *stats = ObjWireStats{};
     uint32_t root = 0;
     if (!ru32(mem, obj_addr + 0x6c, root) || !root) return out;
 
@@ -159,36 +163,66 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
         Frame f = stack.back(); stack.pop_back();
         ++visited;
 
-        MeshWire part = read_node_mesh(mem, f.node, LOD_FINEST, vcap, ecap);
-        // Hard cap: append a part only if the whole part fits (keeps edges valid).
-        if (part.ok &&
-            out.verts.size() / 3 + part.verts.size() / 3 <= vcap &&
-            out.edges.size() / 2 + part.edges.size() / 2 <= ecap) {
-            uint32_t base = (uint32_t)(out.verts.size() / 3);
-            size_t nv = part.verts.size() / 3;
-            bool bad = false;
-            std::vector<float> tv; tv.reserve(nv * 3);
-            for (size_t i = 0; i < nv; ++i) {
-                float ox, oy, oz;
-                mat_apply(f.m, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
-                if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
-                    std::fabs(ox) > 1e6f || std::fabs(oy) > 1e6f || std::fabs(oz) > 1e6f) { bad = true; break; }
-                tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
-            }
-            if (!bad) {
-                for (float v : tv) out.verts.push_back(v);
-                for (uint32_t e : part.edges) out.edges.push_back(base + e);
+        // Draw real models only: skip built-in primitive proxies (id<1000 — the
+        // box/cone collision/nav/LOD-icon stand-ins) but still traverse through them
+        // to reach real children. lod_level: 0=finest, higher=coarser (perf).
+        uint32_t pid = 0; ru32(mem, f.node + 0x12c, pid);
+        MeshWire part;
+        if ((int32_t)pid >= 0 && pid >= min_model_id)
+            part = read_node_mesh(mem, f.node, lod_level, vcap, ecap);
+        if (part.ok) {
+            if (stats) { stats->resolved++; stats->sum_resolved_v += part.verts.size() / 3; }
+            // Hard cap: append a part only if the whole part fits (keeps edges valid).
+            if (out.verts.size() / 3 + part.verts.size() / 3 <= vcap &&
+                out.edges.size() / 2 + part.edges.size() / 2 <= ecap) {
+                uint32_t base = (uint32_t)(out.verts.size() / 3);
+                size_t nv = part.verts.size() / 3;
+                bool bad = false;
+                std::vector<float> tv; tv.reserve(nv * 3);
+                for (size_t i = 0; i < nv; ++i) {
+                    float ox, oy, oz;
+                    mat_apply(f.m, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
+                    if (stats) {
+                        float mc = std::fabs(ox);
+                        if (std::fabs(oy) > mc) mc = std::fabs(oy);
+                        if (std::fabs(oz) > mc) mc = std::fabs(oz);
+                        if (mc > stats->max_coord) stats->max_coord = mc;
+                    }
+                    if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
+                        std::fabs(ox) > 1e6f || std::fabs(oy) > 1e6f || std::fabs(oz) > 1e6f) { bad = true; break; }
+                    tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
+                }
+                if (!bad) {
+                    if (stats) stats->kept++;
+                    for (float v : tv) out.verts.push_back(v);
+                    for (uint32_t e : part.edges) out.edges.push_back(base + e);
+                } else if (stats) stats->dropped_guard++;
             }
         }
 
+        // Walk the child sibling-list, but stay ON the real scene graph. A leaf's
+        // stale +0x0c / a list's stale +0x00 can point into non-node memory; read
+        // as a transform that yields random rotation/scale (|.|≈±32768) which would
+        // fling its subtree to millions and exhaust the node budget. Reject any
+        // candidate that is null/misaligned or whose LOCAL transform is not sane
+        // (real nodes: rotation/scale ≈ ±1, translation a modest model-space offset).
         uint32_t c = 0;
         ru32(mem, f.node + 0x0c, c);
         for (size_t g = 0; c && g < node_cap; ++g) {
-            if (seen.insert(c).second)
-                stack.push_back({c, mat_mul(f.m, node_local(mem, c))});
+            if (c < 0x1000u || (c & 3u) != 0u) break;            // null / small-int / misaligned
+            if (seen.insert(c).second) {
+                Mat34 lc = node_local(mem, c);
+                bool sane = true;
+                for (int k = 0; k < 12 && sane; ++k) {
+                    float lim = (k == 3 || k == 7 || k == 11) ? 1e4f : 16.0f;  // translation vs rot/scale
+                    if (!std::isfinite(lc.m[k]) || std::fabs(lc.m[k]) > lim) sane = false;
+                }
+                if (sane) stack.push_back({c, mat_mul(f.m, lc)});
+            }
             if (!ru32(mem, c + 0x00, c)) break;
         }
     }
+    if (stats) stats->nodes = visited;
     out.ok = !out.verts.empty();
     return out;
 }
