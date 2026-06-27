@@ -174,10 +174,11 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
                 int64_t dz = (int64_t)o.z - rc->pz;
                 o.dist = (int32_t)std::llround(std::sqrt((double)(dx*dx + dy*dy + dz*dz)));
             }
-            // Ships beyond the scanner range are hidden (matching the gravidar),
-            // unless the object is already known (+0x40 & 0x8).
+            // Ships beyond the scanner range are hidden, matching the gravidar.
+            // (The +0x40 bit3 "0x8" is set ON out-of-range contacts here, so it is
+            // NOT a "show anyway" flag — we cull every ship past the range.)
             bool out_of_range = (rc && rc->valid && o.type == off::TYPE_SHIP &&
-                                 !(f40 & off::FLAG_KNOWN) && (int64_t)o.dist > rc->range);
+                                 (int64_t)o.dist > rc->range);
             if (!out_of_range)
                 out.push_back(std::move(o));
         }

@@ -1029,7 +1029,7 @@ static void map3d_panel(void)
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
     auto KY = [&](int32_t a){ return -(a - view.player_y) / U; };   // engine Y is down; flip for screen-up
-    auto KZ = [&](int32_t a){ return (a - view.player_z) / U; };
+    auto KZ = [&](int32_t a){ return -(a - view.player_z) / U; };   // engine Z forward; flip front/back
     // Project a world km-point relative to the (lerped) look-at center.
     auto PROJ = [&](float wx, float wy, float wz, ImVec2& s, float& d) {
         return project3d(cam, ctr, focal, wx - cam.cx, wy - cam.cy, wz - cam.cz, s, d);
