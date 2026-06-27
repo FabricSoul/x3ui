@@ -484,8 +484,8 @@ static void test_object_transform_translation() {
     fm.w(child + 0x3c + 1 * 0x10 + 4, 0x10000);             // R[1][1] = 1.0
     fm.w(child + 0x3c + 2 * 0x10 + 8, 0x10000);             // R[2][2] = 1.0
     fm.w(child + 0x70, 0x10000); fm.w(child + 0x74, 0x10000); fm.w(child + 0x78, 0x10000); // scale 1
-    fm.w(child + 0x2c, (uint32_t)(int32_t)(0.5f  * 16384)); //  8192
-    fm.w(child + 0x30, (uint32_t)(int32_t)(-0.25f * 16384));// -4096
+    fm.w(child + 0x2c, (uint32_t)(int32_t)(0.5f  * 65536)); // 16.16 fixed: 0.5
+    fm.w(child + 0x30, (uint32_t)(int32_t)(-0.25f * 65536));// 16.16 fixed: -0.25
     fm.w(child + 0x34, 0);
 
     auto w = x3::read_object_wireframe(fm.mem(), obj);

@@ -120,10 +120,11 @@ void mat_apply(const Mat34& m, float x, float y, float z, float& ox, float& oy, 
     oz = m.m[8]*x + m.m[9]*y + m.m[10]*z + m.m[11];
 }
 
-// Translation fixed-point divisor (model-space units, same 2^14 as vertices).
-// CALIBRATE LIVE — see the plan's live-calibration task. If parts sit too
-// close/far, adjust this.
-constexpr float kTransDiv = 16384.0f;
+// Translation fixed-point divisor. The node transform (rotation 3x3, scale, and
+// translation) is 16.16 fixed-point (0x10000 = 1.0, same as the scale at +0x70),
+// so translation divides by 65536 — NOT the vertices' 2^14. Using 2^14 made part
+// offsets 4x too large, floating station modules ~4x off the hull.
+constexpr float kTransDiv = 65536.0f;
 
 // One node's local transform = T * R * S, read from the node fields.
 Mat34 node_local(const Mem& mem, uint32_t node) {
