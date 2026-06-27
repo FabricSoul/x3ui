@@ -14,8 +14,19 @@
 
 namespace x3 {
 
+// Accepts "0x..", decimal, and sums like "0x1f6f8d10+0x6c" (so callers can write
+// base+offset directly).
 static uint32_t parse_addr(const std::string &s) {
-    return (uint32_t)strtoul(s.c_str(), nullptr, 0);  // 0x.. or decimal
+    uint32_t total = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t plus = s.find('+', i);
+        std::string term = (plus == std::string::npos) ? s.substr(i) : s.substr(i, plus - i);
+        total += (uint32_t)strtoul(term.c_str(), nullptr, 0);
+        if (plus == std::string::npos) break;
+        i = plus + 1;
+    }
+    return total;
 }
 
 std::string handle_request(const Mem &mem, const std::string &line) {
