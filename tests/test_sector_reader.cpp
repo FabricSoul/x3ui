@@ -480,22 +480,19 @@ static void test_object_transform_translation() {
     fm.w(root + 0x12c, 10);
     fm.w(root + 0xc, child);
     fm.w(child + 0x12c, 11);
-    // child local transform: identity rotation, unit scale, translation (0.5, -0.25, 0)
-    fm.w(child + 0x3c + 0 * 0x10 + 0, 0x10000);             // R[0][0] = 1.0
-    fm.w(child + 0x3c + 1 * 0x10 + 4, 0x10000);             // R[1][1] = 1.0
-    fm.w(child + 0x3c + 2 * 0x10 + 8, 0x10000);             // R[2][2] = 1.0
-    fm.w(child + 0x70, 0x10000); fm.w(child + 0x74, 0x10000); fm.w(child + 0x78, 0x10000); // scale 1
-    fm.w(child + 0x2c, (uint32_t)(int32_t)(0.5f  * 65536)); // 16.16 fixed: 0.5
-    fm.w(child + 0x30, (uint32_t)(int32_t)(-0.25f * 65536));// 16.16 fixed: -0.25
-    fm.w(child + 0x34, 0);
+    // child cached WORLD pos (+0x9c) offset (5, -3, 0) from root (root pos unset = 0);
+    // identity world orient (+0xac unset) and unit size (+0x6c unset) leave the vert as-is.
+    fm.w(child + 0x9c, (uint32_t)5);
+    fm.w(child + 0xa0, (uint32_t)(int32_t)-3);
+    fm.w(child + 0xa4, 0);
 
     auto w = x3::read_object_wireframe(fm.mem(), obj);
     CHECK_EQ(w.vcount(), (size_t)2);
-    // child's origin vert must land at the translation (0.5, -0.25, 0)
+    // child's origin vert must land at its world-pos offset (5, -3, 0)
     bool placed = false;
     for (size_t i = 0; i + 3 <= w.verts.size(); i += 3)
-        if (w.verts[i] > 0.49f && w.verts[i] < 0.51f &&
-            w.verts[i+1] > -0.26f && w.verts[i+1] < -0.24f) placed = true;
+        if (w.verts[i] > 4.9f && w.verts[i] < 5.1f &&
+            w.verts[i+1] > -3.1f && w.verts[i+1] < -2.9f) placed = true;
     CHECK(placed);
 }
 
