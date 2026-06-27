@@ -589,10 +589,28 @@ static void test_vertex_normals() {
     }
 }
 
+// The gravidar object = the g_hud_mgr hashmap entry whose scanner source == player ship.
+static void test_find_player_gravidar() {
+    FakeMem fm;
+    uint32_t player = 0x8000;
+    fm.w(0x0837a100, 0x9000);        // HUD mgr global -> hud
+    fm.w(0x9000 + 0x00, 0x9100);     // hashmap = *(hud)
+    fm.w(0x9100 + 0x00, 0x9200);     // buckets ptr
+    fm.w(0x9100 + 0x04, 0);          // mask = 0 (single bucket)
+    fm.w(0x9200 + 0x00, 0x9300);     // buckets[0] -> node
+    fm.w(0x9300 + 0x08, 0x9400);     // node.value = gravidar
+    fm.w(0x9400 + 0x10, player);     // gravidar source == player
+    CHECK_EQ(x3::find_player_gravidar(fm.mem(), player), 0x9400u);
+    CHECK_EQ(x3::find_player_gravidar(fm.mem(), 0xdeadu), 0u);  // wrong player -> not found
+    FakeMem empty;
+    CHECK_EQ(x3::find_player_gravidar(empty.mem(), player), 0u);  // no hud mgr -> 0
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
     RUN(test_scanner_range_filter);
+    RUN(test_find_player_gravidar);
     RUN(test_gate_dest_name);
     RUN(test_iff_relation);
     RUN(test_text_db_resolve);

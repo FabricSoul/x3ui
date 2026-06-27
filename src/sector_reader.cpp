@@ -530,6 +530,30 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
     return out;
 }
 
+uint32_t find_player_gravidar(const Mem& mem, uint32_t player_ship) {
+    if (!player_ship) return 0;
+    uint32_t hud = 0, hmap = 0, buckets = 0, mask = 0;
+    if (!ru32(mem, off::HUD_MGR_GLOBAL, hud) || !hud) return 0;
+    if (!ru32(mem, hud, hmap) || !hmap) return 0;                       // hashmap = *(hud)
+    if (!ru32(mem, hmap + off::HASH_BUCKETS, buckets) || !buckets) return 0;
+    ru32(mem, hmap + off::HASH_MASK, mask);
+    uint32_t lim = (mask < 1024) ? mask : 1024;
+    for (uint32_t i = 0; i <= lim; ++i) {
+        uint32_t node = 0;
+        if (!ru32(mem, buckets + i * 4, node)) continue;
+        for (int guard = 0; node && guard < 64; ++guard) {
+            uint32_t grav = 0, src = 0;
+            if (ru32(mem, node + off::HASH_NODE_VALUE, grav) && grav &&
+                ru32(mem, grav + off::GRAVIDAR_SOURCE, src) && src == player_ship)
+                return grav;                                            // the player's gravidar
+            uint32_t nxt = 0;
+            if (!ru32(mem, node + off::HASH_NODE_NEXT, nxt)) break;
+            node = nxt;
+        }
+    }
+    return 0;
+}
+
 // Resolve player position + scanner range for the visibility test. Walks the
 // gravidar out of the HUD manager's hashmap (the one whose scanner source == the
 // player ship) and reads its cached scanner range. Returns {valid=false} if
@@ -549,29 +573,10 @@ static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
     if (!ru32(mem, ptf + off::TF_X, px) || !ru32(mem, ptf + off::TF_Y, py) ||
         !ru32(mem, ptf + off::TF_Z, pz)) return rc;
 
-    uint32_t hud = 0, hmap = 0, buckets = 0, mask = 0;
-    if (!ru32(mem, off::HUD_MGR_GLOBAL, hud) || !hud) return rc;
-    if (!ru32(mem, hud, hmap) || !hmap) return rc;                       // hashmap = *(hud)
-    if (!ru32(mem, hmap + off::HASH_BUCKETS, buckets) || !buckets) return rc;
-    ru32(mem, hmap + off::HASH_MASK, mask);
-
+    uint32_t grav = find_player_gravidar(mem, player);
+    rc.gravidar_addr = grav;                       // set even if range is unavailable below
     uint32_t range = 0;
-    uint32_t lim = (mask < 1024) ? mask : 1024;
-    for (uint32_t i = 0; i <= lim && !range; ++i) {
-        uint32_t node = 0;
-        if (!ru32(mem, buckets + i * 4, node)) continue;
-        for (int guard = 0; node && guard < 64; ++guard) {
-            uint32_t grav = 0, src = 0;
-            if (ru32(mem, node + off::HASH_NODE_VALUE, grav) && grav &&
-                ru32(mem, grav + off::GRAVIDAR_SOURCE, src) && src == player) {
-                ru32(mem, grav + off::GRAVIDAR_RANGE, range);
-                break;
-            }
-            uint32_t nxt = 0;
-            if (!ru32(mem, node + off::HASH_NODE_NEXT, nxt)) break;
-            node = nxt;
-        }
-    }
+    if (grav) ru32(mem, grav + off::GRAVIDAR_RANGE, range);
     if (!range) return rc;
 
     rc.valid = true;

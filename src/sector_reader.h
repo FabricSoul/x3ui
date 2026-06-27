@@ -61,12 +61,18 @@ struct RangeCtx {
     int64_t  range = 0;               // scanner range (raw units)
     int16_t  player_race  = -1;       // player ship race id (for the IFF relation)
     uint32_t player_ship  = 0;        // the player's own ship address (== REL_OWN)
+    uint32_t gravidar_addr = 0;       // player's gravidar/HUD object (target + range live here)
 };
 
 // Convenience alias to the scene-global address (aliases the single source of
 // truth in struct_offsets.h — no duplicate literal). Must precede the function
 // that defaults to it.
 constexpr uint32_t off_SCENE_GLOBAL = off::SCENE_GLOBAL;
+
+// Address of the player's gravidar/HUD-state object (the g_hud_mgr hashmap entry whose
+// scanner source == player_ship), or 0 if not resolvable. Pure reads via Mem. Used for the
+// scanner range (+0x240) and the player's current target (+0x1bc).
+uint32_t find_player_gravidar(const Mem& mem, uint32_t player_ship);
 
 // Walk the contained-object list of a type-7 sector object. cap bounds iterations.
 // If `rc` is non-null and valid, ships beyond the scanner range are dropped.
