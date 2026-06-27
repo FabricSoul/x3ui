@@ -858,25 +858,6 @@ static void map3d_panel(void)
     dl->PushClipRect(p0, p1, true);
     dl->AddRectFilled(p0, p1, IM_COL32(7, 9, 16, 255));
 
-    // starfield (generated once in normalized coords)
-    static bool stars_init = false;
-    static ImVec2 stars[160]; static float star_b[160];
-    if (!stars_init) {
-        uint32_t s = 0x1234567u;
-        for (int i = 0; i < 160; ++i) {
-            s = s*1664525u + 1013904223u; float a = ((s >> 8) & 0xFFFF) / 65535.0f;
-            s = s*1664525u + 1013904223u; float b = ((s >> 8) & 0xFFFF) / 65535.0f;
-            s = s*1664525u + 1013904223u; float c = ((s >> 8) & 0xFFFF) / 65535.0f;
-            stars[i] = ImVec2(a, b); star_b[i] = 0.2f + 0.6f*c;
-        }
-        stars_init = true;
-    }
-    for (int i = 0; i < 160; ++i) {
-        ImVec2 sp(p0.x + stars[i].x*avail.x, p0.y + stars[i].y*avail.y);
-        dl->AddRectFilled(sp, ImVec2(sp.x+1, sp.y+1),
-                          IM_COL32(200, 210, 235, (int)(star_b[i]*160)));
-    }
-
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
     auto KY = [&](int32_t a){ return (a - view.player_y) / U; };
@@ -919,7 +900,10 @@ static void map3d_panel(void)
     std::sort(ps.begin(), ps.end(), [](const PObj& a, const PObj& b){ return a.depth > b.depth; });
     for (const auto& e : ps) {
         const auto& o = *e.o; ImU32 col = type_color(o.type);
-        if (e.gok) dl->AddLine(e.ground, e.s, (col & 0x00FFFFFFu) | 0x33000000u, 1.0f);
+        if (e.gok) {
+            dl->AddLine(e.ground, e.s, (col & 0x00FFFFFFu) | 0x55000000u, 1.0f);
+            dl->AddCircleFilled(e.ground, 1.6f, (col & 0x00FFFFFFu) | 0x66000000u); // ground tick
+        }
         float rad = 70.0f / e.depth; rad = rad < 1.5f ? 1.5f : (rad > 9.0f ? 9.0f : rad);
         dl->AddCircleFilled(e.s, rad*2.4f, (col & 0x00FFFFFFu) | 0x22000000u);
         dl->AddCircleFilled(e.s, rad, col);
@@ -940,6 +924,26 @@ static void map3d_panel(void)
         }
     }
     dl->PopClipRect();
+
+    // hover tooltip: nearest projected object to the cursor
+    if (hov) {
+        ImVec2 m = ImGui::GetIO().MousePos;
+        const x3::ObjInfo* best = nullptr; float bd2 = 16.0f * 16.0f;
+        for (const auto& e : ps) {
+            float dx = e.s.x - m.x, dy = e.s.y - m.y, d2 = dx*dx + dy*dy;
+            if (d2 < bd2) { bd2 = d2; best = e.o; }
+        }
+        if (best) {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s  (%s)", best->name.empty() ? "(unnamed)" : best->name.c_str(),
+                        x3::type_label(best->type));
+            ImGui::Text("id %u   type %d/%d", best->id, (int)best->type, (int)best->subtype);
+            if (best->dist >= 0) ImGui::Text("dist %.1f km", best->dist / U);
+            ImGui::Text("pos %.1f, %.1f, %.1f km", best->x / U, best->y / U, best->z / U);
+            ImGui::EndTooltip();
+        }
+    }
+
     if (!view.sector_name.empty())
         dl->AddText(ImVec2(p0.x + 6, p0.y + 4), IM_COL32(180, 200, 220, 210),
                     view.sector_name.c_str());
