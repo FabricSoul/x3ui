@@ -685,6 +685,19 @@ static x3::Mem make_engine_mem(void)
         }
         return s;
     };
+    // Resolve {page,id} text refs via the engine's own get_text_simple(page,id).
+    // __cdecl(int,int)->char*, read-only; safe here because read_current_sector and
+    // the debug pump both run on the main thread between frames.
+    m.text = [](uint32_t page, uint32_t id) -> std::string {
+        typedef const char* (*get_text_t)(int, int);
+        static get_text_t get_text = (get_text_t)0x080acd30;
+        const char* s = get_text((int)page, (int)id);
+        if (!s) return "";
+        std::string out;
+        for (int i = 0; i < 128 && s[i]; ++i) out.push_back(s[i]);
+        if (out == "=TextIDNotFound=") return "";   // engine's not-found sentinel
+        return out;
+    };
     return m;
 }
 
@@ -1015,7 +1028,7 @@ static void map3d_panel(void)
 
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
-    auto KY = [&](int32_t a){ return (a - view.player_y) / U; };
+    auto KY = [&](int32_t a){ return -(a - view.player_y) / U; };   // engine Y is down; flip for screen-up
     auto KZ = [&](int32_t a){ return (a - view.player_z) / U; };
     // Project a world km-point relative to the (lerped) look-at center.
     auto PROJ = [&](float wx, float wy, float wz, ImVec2& s, float& d) {

@@ -31,6 +31,9 @@ struct Mem {
     std::function<bool(uint32_t addr, uint32_t& out)> u32;
     // Read a NUL-terminated string at `addr` (<= maxlen bytes). "" if 0/unreadable.
     std::function<std::string(uint32_t addr, size_t maxlen)> cstr;
+    // Resolve a {textPage, textID} reference to its string (the engine does the
+    // lookup + marker expansion). "" if unset/unavailable. Optional.
+    std::function<std::string(uint32_t page, uint32_t id)> text;
 };
 
 struct SectorView {

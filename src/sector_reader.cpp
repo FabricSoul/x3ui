@@ -11,52 +11,26 @@ static bool ru32(const Mem& m, uint32_t addr, uint32_t& out) {
     return m.u32 && m.u32(addr, out);
 }
 
-// Resolve a {textPage, textID} reference to its string by walking the engine's
-// loaded text database (the path the game uses for object names). Returns "" if
-// not resolvable. Layout (verified): g_text_db_root@0x08308880; language index =
-// *(g_render_config@0x0829d798 + 0x708); per-language page hashtable at root+0x334;
-// page bucket list keyed by page; page object -> {count, entryArray}; entries are
-// 12-byte {textID, char*, _} sorted by textID (binary search).
+// Resolve a {textPage, textID} reference via the engine's text lookup (the entry's
+// string is stored inline as a 0x0b-marker reference that needs the engine's
+// expander, so we call the game's get_text_simple through mem.text rather than
+// re-implement it). "" if unavailable or not found.
 std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id) {
-    uint32_t host = 0, cfg = 0, lang = 0, pageTbl = 0, buckets = 0, nbuck = 0, node = 0;
-    if (!ru32(mem, off::TEXTDB_ROOT, host) || !host) return "";
-    if (!ru32(mem, off::RENDER_CONFIG, cfg) || !cfg) return "";
-    if (!ru32(mem, cfg + off::CFG_LANG, lang) || lang > 64) return "";
-    if (!ru32(mem, host + off::TEXTDB_PAGETBL + lang * 4, pageTbl) || !pageTbl) return "";
-    if (!ru32(mem, pageTbl, buckets) || !buckets) return "";
-    if (!ru32(mem, pageTbl + 4, nbuck) || !nbuck || nbuck > (1u << 24)) return "";
-    if (!ru32(mem, buckets + ((nbuck - 1) & page) * 4, node)) return "";
-    for (int guard = 0; node && guard < 65536; ++guard) {
-        uint32_t pid = 0;
-        if (!ru32(mem, node + 4, pid)) return "";
-        if (pid == page) break;
-        if (!ru32(mem, node, node)) return "";    // node = node->next
-    }
-    if (!node) return "";
-    uint32_t pageObj = 0, cnt = 0, arr = 0;
-    if (!ru32(mem, node + 8, pageObj) || !pageObj) return "";
-    if (!ru32(mem, pageObj, cnt) || cnt > (1u << 22)) return "";
-    if (!ru32(mem, pageObj + 4, arr) || !arr) return "";
-    int lo = 0, hi = (int)cnt;
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        uint32_t key = 0;
-        if (!ru32(mem, arr + (uint32_t)mid * 12, key)) return "";
-        if ((int32_t)key == (int32_t)id) {
-            uint32_t sp = 0;
-            if (ru32(mem, arr + (uint32_t)mid * 12 + 4, sp) && sp && mem.cstr)
-                return mem.cstr(sp, 128);
-            return "";
-        }
-        if ((int32_t)key < (int32_t)id) lo = mid + 1; else hi = mid;
-    }
-    return "";
+    return mem.text ? mem.text(page, id) : std::string();
 }
 
 // Replace each "{page, id}" token in a name with its resolved text. Tokens that
 // don't resolve are left literal (so this never makes a name worse). The engine's
 // own expander skips these when there's a space after the comma, which is why the
 // raw "{17, 6651}" leaks through to the display.
+// A resolved name must be clean printable ASCII; otherwise we treat the lookup as
+// failed (a wrong walk must never replace a token with garbage).
+static bool is_clean_text(const std::string& s) {
+    if (s.empty()) return false;
+    for (unsigned char c : s) if (c < 0x20 || c > 0x7e) return false;
+    return true;
+}
+
 static std::string expand_braces(const Mem& mem, const std::string& in) {
     if (in.find('{') == std::string::npos) return in;
     std::string out;
@@ -69,7 +43,7 @@ static std::string expand_braces(const Mem& mem, const std::string& in) {
                 long id = strtol(in.c_str() + comma + 1, nullptr, 10);
                 if (pg > 0 && id > 0) {
                     std::string r = resolve_text(mem, (uint32_t)pg, (uint32_t)id);
-                    if (!r.empty()) { out += r; i = close + 1; continue; }
+                    if (is_clean_text(r)) { out += r; i = close + 1; continue; }
                 }
             }
         }

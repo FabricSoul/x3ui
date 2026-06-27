@@ -8,14 +8,19 @@
 struct FakeMem {
     std::map<uint32_t, uint32_t> words;
     std::map<uint32_t, std::string> strings;
+    std::map<uint64_t, std::string> texts;   // {page,id} -> resolved string
 
     void w(uint32_t addr, uint32_t val)            { words[addr] = val; }
     void s(uint32_t addr, const std::string& str)  { strings[addr] = str; }
+    void t(uint32_t page, uint32_t id, const std::string& str) {
+        texts[((uint64_t)page << 32) | id] = str;
+    }
 
     x3::Mem mem() {
         x3::Mem m;
         auto* W = &words;
         auto* S = &strings;
+        auto* T = &texts;
         m.u32 = [W](uint32_t a, uint32_t& o) -> bool {
             auto it = W->find(a);
             if (it == W->end()) return false;
@@ -24,6 +29,10 @@ struct FakeMem {
         m.cstr = [S](uint32_t a, size_t) -> std::string {
             auto it = S->find(a);
             return it == S->end() ? std::string() : it->second;
+        };
+        m.text = [T](uint32_t page, uint32_t id) -> std::string {
+            auto it = T->find(((uint64_t)page << 32) | id);
+            return it == T->end() ? std::string() : it->second;
         };
         return m;
     }
