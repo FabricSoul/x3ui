@@ -1268,15 +1268,26 @@ static void mesh_preview_panel(void)
     dl->AddRectFilled(p0, p1, IM_COL32(8, 10, 18, 255));
     Camera3D pc; pc.yaw = g_mesh_yaw; pc.pitch = g_mesh_pitch; pc.dist = g_mesh_dist;
     const float s = 1.0f / extent;                    // normalize model to ~unit size
-    auto PV = [&](uint32_t vi, ImVec2& out, float& dep) {
-        return project3d(pc, ctr, focal, (wire.verts[vi*3+0] - cx) * s,
-                         (wire.verts[vi*3+1] - cy) * s, (wire.verts[vi*3+2] - cz) * s, out, dep);
-    };
-    for (size_t e = 0; e + 1 < wire.edges.size(); e += 2) {
-        ImVec2 a, b; float da, db;
-        if (PV(wire.edges[e], a, da) && PV(wire.edges[e+1], b, db))
-            dl->AddLine(a, b, IM_COL32(120, 200, 255, 110), 1.0f);
+    // Project each UNIQUE vertex once (the naive per-edge projection re-transforms
+    // every shared vertex ~6x), and draw the lines with AA off — both are CPU
+    // draw-list costs that dominate on dense meshes (the GPU draws the batch in one
+    // call regardless).
+    size_t vc = wire.verts.size() / 3;
+    static std::vector<ImVec2> sp; static std::vector<unsigned char> vis;
+    sp.resize(vc); vis.resize(vc);
+    for (size_t i = 0; i < vc; ++i) {
+        float dep;
+        vis[i] = project3d(pc, ctr, focal, (wire.verts[i*3+0] - cx) * s,
+                           (wire.verts[i*3+1] - cy) * s, (wire.verts[i*3+2] - cz) * s, sp[i], dep) ? 1 : 0;
     }
+    bool aa = (dl->Flags & ImDrawListFlags_AntiAliasedLines) != 0;
+    dl->Flags &= ~ImDrawListFlags_AntiAliasedLines;
+    for (size_t e = 0; e + 1 < wire.edges.size(); e += 2) {
+        uint32_t i0 = wire.edges[e], i1 = wire.edges[e + 1];
+        if (i0 < vc && i1 < vc && vis[i0] && vis[i1])
+            dl->AddLine(sp[i0], sp[i1], IM_COL32(120, 200, 255, 110), 1.0f);
+    }
+    if (aa) dl->Flags |= ImDrawListFlags_AntiAliasedLines;
     dl->PopClipRect();
     ImGui::End();
 }
