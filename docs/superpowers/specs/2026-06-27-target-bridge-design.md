@@ -79,8 +79,9 @@ Extract the `g_hud_mgr` hashmap walk currently inlined in `resolve_range_ctx`
 
 ```cpp
 // Address of the player's gravidar/HUD-state object (scanner source == player ship),
-// or 0 if not resolvable. Pure reads via Mem.
-uint32_t find_player_gravidar(const Mem& mem, uint32_t player_ship, uint32_t scene_global = off_SCENE_GLOBAL);
+// or 0 if not resolvable. Pure reads via Mem. (No scene arg — reaches the object via
+// the g_hud_mgr global, same as the inlined walk does today.)
+uint32_t find_player_gravidar(const Mem& mem, uint32_t player_ship);
 ```
 
 `resolve_range_ctx` calls it, then reads `+0x240` for range (behavior unchanged — same
