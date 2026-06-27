@@ -354,7 +354,7 @@ static void reg_model(FakeMem& fm, uint32_t id, int nv,
     }
     if (nv >= 3) {
         uint32_t parts = alloc;  alloc += 0x10;
-        uint32_t part  = alloc;  alloc += 0x10;
+        uint32_t part  = alloc;  alloc += 0x60;   // loader-part (0x58); room for +0x50
         uint32_t groups = alloc; alloc += 0x20;
         uint32_t tris  = alloc;  alloc += 0x10;
         fm.w(mesh + 4, 1);                 // 1 part
@@ -362,6 +362,7 @@ static void reg_model(FakeMem& fm, uint32_t id, int nv,
         fm.w(parts + 0, part);
         fm.w(part + 0, 1);                 // 1 group
         fm.w(part + 4, groups);
+        fm.w(part + 0x50, 1);              // non-zero render-part => passes the part gate
         fm.w(groups + 0, 1);               // 1 triangle
         fm.w(groups + 4, tris);
         fm.w(tris + 0, 0); fm.w(tris + 4, 1); fm.w(tris + 8, 2);  // tri (0,1,2)

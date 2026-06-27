@@ -113,8 +113,12 @@ struct ObjWireStats {
     float  max_coord = 0.0f;   // largest |coord| any transform produced
 };
 // lod_level: 0 = finest detail (slow), higher = coarser (clamped per model, faster).
-// min_model_id: skip drawing nodes whose model id is below this (1000 in-game drops
-// the built-in primitive proxies — box/cone collision & nav stand-ins; 0 = draw all).
+// min_model_id: skip drawing nodes whose model id is below this (1000 in-game drops the
+// built-in primitive proxies; 0 = draw all, unit tests). Independent of that, the engine
+// per-part gate is always applied (a part with no render-part, part+0x50==0, is
+// collision/invisible and skipped — matching render_mesh_part). Children are always
+// traversed. NOTE: node+0x118&2 is a per-frame visibility flag (off-screen objects clear
+// it), so it is NOT used as a draw gate here.
 MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
                                size_t node_cap = 512, size_t vcap = 200000,
                                size_t ecap = 600000, int lod_level = 0,

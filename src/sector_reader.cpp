@@ -27,7 +27,7 @@ enum LodSel { LOD_NODE = -2, LOD_COARSEST = -1 };
 // Read ONE node/object's mesh from resident CPU model data. `node` supplies the
 // model id (+0x12c) and (for LOD_NODE) the LOD index (+0x138). Pure reads, bounded.
 static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
-                               size_t vcap, size_t ecap) {
+                               bool gate_parts, size_t vcap, size_t ecap) {
     MeshWire w;
     uint32_t id = 0;
     if (!ru32(mem, node + 0x12c, id) || (int32_t)id < 0) return w;
@@ -77,6 +77,15 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
     for (int p = 0; p < pcount && parts && w.edges.size() < ecap * 2; ++p) {
         uint32_t part = 0;
         if (!ru32(mem, parts + p * 4, part) || !part) continue;
+        if (gate_parts) {
+            // Engine part gate (render_mesh_part): a part with no render-part group
+            // (part+0x50 == 0) is collision/invisible and is NOT drawn; +0x4c bits
+            // 0x8000/0x20 also mark non-visible parts.
+            uint32_t rp = 0, pf = 0;
+            ru32(mem, part + 0x50, rp);
+            ru32(mem, part + 0x4c, pf);
+            if (rp == 0 || (pf & 0x8020u)) continue;
+        }
         uint32_t gcw = 0, groups = 0;
         ru32(mem, part + 0x0, gcw); int gcount = (int16_t)(gcw & 0xFFFF);
         ru32(mem, part + 0x4, groups);
@@ -98,7 +107,7 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
 
 MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
                              size_t vcap, size_t ecap) {
-    return read_node_mesh(mem, obj, coarsest ? LOD_COARSEST : LOD_NODE, vcap, ecap);
+    return read_node_mesh(mem, obj, coarsest ? LOD_COARSEST : LOD_NODE, false, vcap, ecap);
 }
 
 namespace {
@@ -167,10 +176,13 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
         // Draw real models only: skip built-in primitive proxies (id<1000 — the
         // box/cone collision/nav/LOD-icon stand-ins) but still traverse through them
         // to reach real children. lod_level: 0=finest, higher=coarser (perf).
+        // Draw real models (id >= min_model_id skips primitive proxies); the per-part
+        // collision gate inside read_node_mesh skips parts with no render-part. We
+        // still TRAVERSE every node's children regardless (matches render_object).
         uint32_t pid = 0; ru32(mem, f.node + 0x12c, pid);
         MeshWire part;
         if ((int32_t)pid >= 0 && pid >= min_model_id)
-            part = read_node_mesh(mem, f.node, lod_level, vcap, ecap);
+            part = read_node_mesh(mem, f.node, lod_level, /*gate_parts=*/true, vcap, ecap);
         if (part.ok) {
             if (stats) { stats->resolved++; stats->sum_resolved_v += part.verts.size() / 3; }
             // Hard cap: append a part only if the whole part fits (keeps edges valid).
