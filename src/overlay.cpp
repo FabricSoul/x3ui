@@ -1218,7 +1218,7 @@ static void mesh_preview_panel(void)
     static x3::MeshWire wire;
     static float cx = 0, cy = 0, cz = 0, extent = 1;
     if (g_sel_addr && g_sel_alive && g_sel_addr != cached) {
-        wire = x3::read_mesh_wireframe(make_engine_mem(), g_sel_addr);
+        wire = x3::read_object_wireframe(make_engine_mem(), g_sel_addr);
         cached = g_sel_addr;
         if (wire.ok) {
             float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
