@@ -124,6 +124,13 @@ static void overlay_init(SDL_Window *window)
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.MouseDrawCursor = false;
     ImGui::StyleColorsDark();
+    {   // more opaque panels so the overlay reads cleanly (e.g. screen-recorded demos)
+        ImGuiStyle& st = ImGui::GetStyle();
+        st.Colors[ImGuiCol_WindowBg].w = 0.97f;   // general windows (was ~0.94)
+        st.Colors[ImGuiCol_ChildBg].w  = 0.97f;   // embedded child regions
+        st.Colors[ImGuiCol_TitleBg].w        = 1.0f;
+        st.Colors[ImGuiCol_TitleBgActive].w  = 1.0f;
+    }
 
     SDL_GLContext ctx = SDL_GL_GetCurrentContext();
     ImGui_ImplSDL2_InitForOpenGL(window, ctx);
@@ -1255,6 +1262,7 @@ static void hull_gc(const std::vector<x3::ObjInfo>& live) {
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(1.0f);                 // fully solid viewer for clean demos
     if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
     mem_open();
 
@@ -1596,6 +1604,7 @@ static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
 static void mesh_preview_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(380, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(1.0f);                 // fully solid viewer for clean demos
     if (!ImGui::Begin("x3ui - mesh preview")) { ImGui::End(); return; }
 
     // Re-read geometry only when the selection changes (it's static per object).
@@ -1719,7 +1728,7 @@ static void overlay_draw(void)
     // draw nothing so the game's own cursor shows through.
     ImGui::GetIO().MouseDrawCursor = ImGui::GetIO().WantCaptureMouse;
 
-    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::SetNextWindowBgAlpha(0.96f);
     if (ImGui::Begin("x3ui")) {
         ImGui::Text("x3ui overlay  —  %.1f FPS", ImGui::GetIO().Framerate);
         ImGui::Separator();
