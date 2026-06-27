@@ -733,33 +733,80 @@ static void map_panel(void)
                               : (int)view.objects.size();
     ImGui::SameLine(); ImGui::TextDisabled("|  showing %d", shown);
 
-    // Fill the rest of the window so the whole list is visible (resize the window
-    // to see more; the size persists via imgui.ini).
-    if (ImGui::BeginTable("objs", 5,
-            ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg,
-            ImVec2(0, ImGui::GetContentRegionAvail().y))) {
-        ImGui::TableSetupColumn("id");
-        ImGui::TableSetupColumn("type");
-        ImGui::TableSetupColumn("name");
-        ImGui::TableSetupColumn("dist (km)");
-        ImGui::TableSetupColumn("pos (km)");
+    // Sortable, with a sticky header and a right-click-header column show/hide menu
+    // (id/type hidden by default). Fills the window; size persists via imgui.ini.
+    enum { COL_NAME, COL_DIST, COL_POS, COL_ID, COL_TYPE };
+    ImGuiTableFlags tflags = ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                             ImGuiTableFlags_RowBg | ImGuiTableFlags_Sortable |
+                             ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable |
+                             ImGuiTableFlags_Resizable;
+    if (ImGui::BeginTable("objs", 5, tflags, ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch |
+                                ImGuiTableColumnFlags_DefaultSort, 0.0f, COL_NAME);
+        ImGui::TableSetupColumn("dist (km)", ImGuiTableColumnFlags_WidthFixed, 72.0f, COL_DIST);
+        ImGui::TableSetupColumn("pos (km)", ImGuiTableColumnFlags_WidthStretch, 0.0f, COL_POS);
+        ImGui::TableSetupColumn("id",   ImGuiTableColumnFlags_DefaultHide, 0.0f, COL_ID);
+        ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_DefaultHide, 0.0f, COL_TYPE);
+        ImGui::TableSetupScrollFreeze(0, 1);   // sticky header row
         ImGui::TableHeadersRow();
+
+        static std::vector<const x3::ObjInfo*> rows;
+        rows.clear();
         for (const auto& o : view.objects) {
-            bool is_ship    = (o.type == x3::off::TYPE_SHIP);
-            bool is_station = (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY);
-            if (filter == 1 && !is_ship)    continue;
-            if (filter == 2 && !is_station) continue;
+            bool is_ship = (o.type == x3::off::TYPE_SHIP);
+            bool is_stn  = (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY);
+            if (filter == 1 && !is_ship) continue;
+            if (filter == 2 && !is_stn)  continue;
+            rows.push_back(&o);
+        }
+        if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
+            if (ss->SpecsCount > 0) {
+                const ImGuiTableColumnSortSpecs& sp = ss->Specs[0];
+                bool asc = (sp.SortDirection == ImGuiSortDirection_Ascending);
+                std::sort(rows.begin(), rows.end(),
+                    [&](const x3::ObjInfo* a, const x3::ObjInfo* b) {
+                        long long c = 0;
+                        switch (sp.ColumnUserID) {
+                            case COL_NAME: c = a->name.compare(b->name); break;
+                            case COL_DIST:
+                            case COL_POS:  c = (long long)a->dist - b->dist; break;
+                            case COL_ID:   c = (long long)a->id   - b->id;   break;
+                            case COL_TYPE: c = (long long)a->type - b->type; break;
+                        }
+                        return asc ? (c < 0) : (c > 0);
+                    });
+            }
+        }
+
+        const float U = x3::off::UNITS_PER_KM;
+        for (const x3::ObjInfo* op : rows) {
+            const x3::ObjInfo& o = *op;
             ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::Text("%u", o.id);
-            ImGui::TableNextColumn(); ImGui::Text("%s(%d)", x3::type_label(o.type), o.type);
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(o.name.empty() ? "(unnamed)" : o.name.c_str());
-            ImGui::TableNextColumn();
-            if (o.dist >= 0) ImGui::Text("%.1f", o.dist / x3::off::UNITS_PER_KM);
-            else             ImGui::TextDisabled("-");
-            ImGui::TableNextColumn();
-            ImGui::Text("%.1f, %.1f, %.1f", o.x / x3::off::UNITS_PER_KM,
-                        o.y / x3::off::UNITS_PER_KM, o.z / x3::off::UNITS_PER_KM);
+            ImGui::PushID((int)o.id);
+            ImGui::TableSetColumnIndex(COL_NAME);
+            ImGui::Selectable(o.name.empty() ? "(unnamed)" : o.name.c_str(), false,
+                              ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+            if (ImGui::BeginPopupContextItem("row")) {       // right-click the row
+                ImGui::TextDisabled("%s  (%s)", o.name.empty() ? "(unnamed)" : o.name.c_str(),
+                                    x3::type_label(o.type));
+                ImGui::Separator();
+                char idbuf[32]; snprintf(idbuf, sizeof idbuf, "%u", o.id);
+                if (ImGui::MenuItem("Copy id")) ImGui::SetClipboardText(idbuf);
+                ImGui::BeginDisabled();
+                ImGui::MenuItem("Move here");
+                ImGui::MenuItem("Dock at");
+                ImGui::MenuItem("Attack");
+                ImGui::EndDisabled();
+                ImGui::TextDisabled("(commands: coming with the script bridge)");
+                ImGui::EndPopup();
+            }
+            ImGui::TableSetColumnIndex(COL_DIST);
+            if (o.dist >= 0) ImGui::Text("%.1f", o.dist / U); else ImGui::TextDisabled("-");
+            ImGui::TableSetColumnIndex(COL_POS);
+            ImGui::Text("%.1f, %.1f, %.1f", o.x / U, o.y / U, o.z / U);
+            ImGui::TableSetColumnIndex(COL_ID);   ImGui::Text("%u", o.id);
+            ImGui::TableSetColumnIndex(COL_TYPE); ImGui::Text("%s(%d)", x3::type_label(o.type), o.type);
+            ImGui::PopID();
         }
         ImGui::EndTable();
     }
@@ -925,7 +972,8 @@ static void map3d_panel(void)
     }
     dl->PopClipRect();
 
-    // hover tooltip: nearest projected object to the cursor
+    // hover: nearest projected object -> tooltip; right-click -> context menu.
+    static x3::ObjInfo ctx_obj; static bool ctx_have = false;
     if (hov) {
         ImVec2 m = ImGui::GetIO().MousePos;
         const x3::ObjInfo* best = nullptr; float bd2 = 16.0f * 16.0f;
@@ -941,7 +989,22 @@ static void map3d_panel(void)
             if (best->dist >= 0) ImGui::Text("dist %.1f km", best->dist / U);
             ImGui::Text("pos %.1f, %.1f, %.1f km", best->x / U, best->y / U, best->z / U);
             ImGui::EndTooltip();
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                ctx_obj = *best; ctx_have = true; ImGui::OpenPopup("obj3d_ctx");
+            }
         }
+    }
+    if (ctx_have && ImGui::BeginPopup("obj3d_ctx")) {
+        ImGui::TextDisabled("%s  (%s)", ctx_obj.name.empty() ? "(unnamed)" : ctx_obj.name.c_str(),
+                            x3::type_label(ctx_obj.type));
+        ImGui::Separator();
+        char idbuf[32]; snprintf(idbuf, sizeof idbuf, "%u", ctx_obj.id);
+        if (ImGui::MenuItem("Copy id")) ImGui::SetClipboardText(idbuf);
+        ImGui::BeginDisabled();
+        ImGui::MenuItem("Move here"); ImGui::MenuItem("Dock at"); ImGui::MenuItem("Attack");
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("(commands: coming with the script bridge)");
+        ImGui::EndPopup();
     }
 
     if (!view.sector_name.empty())
