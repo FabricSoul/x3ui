@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>   // GL enums + PFNGL* types (entrypoints loaded at runtime)
@@ -1178,6 +1179,63 @@ static void m_mul(float* o, const float* a, const float* b) {  // o = a*b
         o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
 }
 } // namespace meshgl
+
+// ---- solid hull cache (read once per object, placed live each frame) -----------
+struct HullCache {
+    meshgl::Hull gpu;
+    float        extent_km = 1.0f;   // body bbox half-extent in km (for dot<->hull + box)
+    uint32_t     model_id  = 0;      // root model id at read time (re-read if it changes)
+    int          lod       = -1;     // map LOD at read time
+    bool         ok        = false;
+};
+static std::unordered_map<uint32_t, HullCache> g_hulls;   // key = object address
+static int g_map_lod = 3;                                 // hull detail in the map
+
+// Ensure object `addr` (root model `mid`) has a cached hull at the current map LOD.
+// Reads at most when missing/stale; returns nullptr if it has no resolvable mesh.
+// `budget` is decremented on an actual (expensive) read; pass a per-frame counter.
+static HullCache* hull_ensure(uint32_t addr, uint32_t mid, int& budget) {
+    auto it = g_hulls.find(addr);
+    if (it != g_hulls.end() && it->second.lod == g_map_lod && it->second.model_id == mid)
+        return it->second.ok ? &it->second : nullptr;
+    if (budget <= 0) return (it != g_hulls.end() && it->second.ok) ? &it->second : nullptr;
+    --budget;
+    HullCache hc;
+    hc.model_id = mid; hc.lod = g_map_lod;
+    x3::Mem mem = make_engine_mem();
+    x3::MeshWire w = x3::read_object_wireframe(mem, addr, 512, 200000, 600000, g_map_lod, 1000);
+    if (w.ok && !w.tris.empty()) {
+        // Un-rotate world-oriented geometry into body frame by R_read^T (root+0x3c).
+        uint32_t root = 0; float R[9] = {1,0,0, 0,1,0, 0,0,1};
+        if (x3::read_object_root(mem, addr, root)) x3::read_node_orient(mem, root, 0x3c, R);
+        float lo[3]={1e30f,1e30f,1e30f}, hi[3]={-1e30f,-1e30f,-1e30f};
+        for (size_t i = 0; i + 2 < w.verts.size(); i += 3) {
+            float x=w.verts[i], y=w.verts[i+1], z=w.verts[i+2];
+            // body = R^T * world : out_i = sum_j R[j*3+i]*v_j
+            float bx=R[0]*x+R[3]*y+R[6]*z, by=R[1]*x+R[4]*y+R[7]*z, bz=R[2]*x+R[5]*y+R[8]*z;
+            w.verts[i]=bx; w.verts[i+1]=by; w.verts[i+2]=bz;
+            for (int k=0;k<3;++k){ float v=(k==0?bx:k==1?by:bz); lo[k]=std::min(lo[k],v); hi[k]=std::max(hi[k],v);} }
+        std::vector<float> nrm = x3::compute_vertex_normals(w.verts, w.tris);
+        if (!meshgl::g_tried) meshgl::init();
+        if (meshgl::g_ok) hc.gpu = meshgl::hull_create(w.verts, nrm, w.tris);
+        float ext = std::max(std::max(hi[0]-lo[0], hi[1]-lo[1]), hi[2]-lo[2]) * 0.5f;
+        hc.extent_km = (ext > 1e-3f ? ext : 1.0f) / x3::off::UNITS_PER_KM;
+        hc.ok = (hc.gpu.icount > 0);
+    }
+    if (it != g_hulls.end()) meshgl::hull_destroy(it->second.gpu);
+    g_hulls[addr] = hc;
+    return hc.ok ? &g_hulls[addr] : nullptr;
+}
+
+// Drop hulls for objects no longer in `live` (despawned / out of range).
+static void hull_gc(const std::vector<x3::ObjInfo>& live) {
+    std::unordered_set<uint32_t> keep;
+    for (const auto& o : live) keep.insert(o.addr);
+    for (auto it = g_hulls.begin(); it != g_hulls.end(); ) {
+        if (!keep.count(it->first)) { meshgl::hull_destroy(it->second.gpu); it = g_hulls.erase(it); }
+        else ++it;
+    }
+}
 
 static void map3d_panel(void)
 {
