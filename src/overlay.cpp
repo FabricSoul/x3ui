@@ -1445,20 +1445,24 @@ static void map3d_panel(void)
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; e.hull = nullptr; e.rpx = 0; float gd;
         e.gok = PROJ(KX(o.x), 0, KZ(o.z), e.ground, gd);
-        // Promote to a hull when big enough on screen. The cheap +0x6c size scalar is a
-        // pre-read extent estimate (~= true extent for these models), so distant dot-only
-        // objects are never read; LOD is chosen from apparent size (finer when zoomed in).
-        uint32_t root = 0, mid = 0, sz = 0;
-        if (x3::read_object_root(emem, o.addr, root)) {
+        // Hull promotion + distance-driven LOD. The root node's +0x6c is NOT the object
+        // size (the mesh lives on child nodes), so read once at a coarse LOD to learn the
+        // true extent, then refine actual hulls' LOD by apparent screen size. Skip the
+        // huge Sun/Planet backdrops (keep them as blips).
+        bool hullable = (o.type != x3::off::TYPE_SUN && o.type != x3::off::TYPE_PLANET);
+        uint32_t root = 0, mid = 0;
+        if (hullable && x3::read_object_root(emem, o.addr, root)) {
             emem.u32(root + 0x12c, mid);
-            emem.u32(root + 0x6c, sz);
-            float est_rpx = ((float)sz / U) / d * focal;
-            if (est_rpx > 6.0f) {
-                int want = lod_for_rpx(est_rpx) + g_map_lod;
-                want = want < 0 ? 0 : (want > 6 ? 6 : want);
-                HullCache* hc = hull_ensure(o.addr, mid, want, hull_budget);
-                if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
-            }
+            auto cit = g_hulls.find(o.addr);
+            bool have = (cit != g_hulls.end() && cit->second.ok);
+            float rpx = have ? cit->second.extent_km / d * focal : 0.0f;
+            int want;
+            if (!have)           want = 4;                              // coarse first read -> extent
+            else if (rpx > 6.0f) want = lod_for_rpx(rpx) + g_map_lod;   // hull -> distance LOD
+            else                 want = cit->second.lod;               // dot -> keep, no re-read
+            want = want < 0 ? 0 : (want > 6 ? 6 : want);
+            HullCache* hc = hull_ensure(o.addr, mid, want, hull_budget);
+            if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
         }
         ps.push_back(e);
     }
@@ -1557,9 +1561,11 @@ static void map3d_panel(void)
                 ImVec2 dd = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
                 if (fabsf(dd.x) + fabsf(dd.y) < 4.0f) select_target(*best);
             }
-            // Double-click eases the camera to focus on the object.
+            // Double-click eases the camera to focus on the object AND tracks it (the
+            // per-frame focus_addr block keeps the look-at center on it as it moves).
             if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 cam.tx = KX(best->x); cam.ty = KY(best->y); cam.tz = KZ(best->z);
+                focus_addr = best->addr;
                 select_target(*best);
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
