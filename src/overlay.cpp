@@ -759,6 +759,14 @@ static void overlay_draw(void)
         ImGui::Text("x3ui overlay  —  %.1f FPS", ImGui::GetIO().Framerate);
         ImGui::Separator();
         ImGui::TextDisabled("ScrollLock: show/hide");
+        {   // TEMP DIAG: input capture state (hover the table + scroll to watch)
+            ImGuiIO &dio = ImGui::GetIO();
+            static float wheel_total = 0.0f;
+            wheel_total += dio.MouseWheel;
+            ImGui::Text("capM=%d capK=%d wheelTotal=%.1f pos=(%.0f,%.0f)",
+                        dio.WantCaptureMouse ? 1 : 0, dio.WantCaptureKeyboard ? 1 : 0,
+                        wheel_total, dio.MousePos.x, dio.MousePos.y);
+        }
 
         ImGui::SeparatorText("engine bridge (experimental)");
         // PROOF #1 (safe, no game effect): queue an existing MSCI entry. A
