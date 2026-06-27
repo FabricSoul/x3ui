@@ -37,6 +37,7 @@
 #include <unordered_map>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_opengl.h>   // GL enums + PFNGL* types (entrypoints loaded at runtime)
 
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
@@ -1209,6 +1210,126 @@ static void map3d_panel(void)
 static float g_mesh_yaw = 0.7f, g_mesh_pitch = 0.3f, g_mesh_dist = 3.2f;
 static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
 
+// ───────────────────────── GPU wireframe line renderer ─────────────────────
+// A dense preview (100k+ verts / 280k+ edges) made the per-frame ImGui CPU line
+// build the bottleneck. Instead we upload the NORMALIZED line geometry to a GL
+// buffer ONCE per selection and draw it in one glDrawElements via an ImGui draw
+// callback, with the orbit camera as an MVP uniform — per-frame CPU cost drops to
+// a 4x4 matrix + one draw call. GL 2.0+ entrypoints load via SDL_GL_GetProcAddress
+// (the game's context is GL 3.0+/GLSL 130); GL 1.1 calls are linked directly.
+namespace meshgl {
+static bool    g_tried = false, g_ok = false;
+static GLuint  g_vao = 0, g_vbo = 0, g_ebo = 0, g_prog = 0;
+static GLint   g_uMVP = -1, g_uColor = -1;
+static GLsizei g_edge_count = 0;
+
+static PFNGLGENBUFFERSPROC              pGenBuffers;
+static PFNGLBINDBUFFERPROC              pBindBuffer;
+static PFNGLBUFFERDATAPROC              pBufferData;
+static PFNGLGENVERTEXARRAYSPROC         pGenVertexArrays;
+static PFNGLBINDVERTEXARRAYPROC         pBindVertexArray;
+static PFNGLENABLEVERTEXATTRIBARRAYPROC pEnableVertexAttribArray;
+static PFNGLVERTEXATTRIBPOINTERPROC     pVertexAttribPointer;
+static PFNGLCREATESHADERPROC            pCreateShader;
+static PFNGLSHADERSOURCEPROC            pShaderSource;
+static PFNGLCOMPILESHADERPROC           pCompileShader;
+static PFNGLCREATEPROGRAMPROC           pCreateProgram;
+static PFNGLATTACHSHADERPROC            pAttachShader;
+static PFNGLBINDATTRIBLOCATIONPROC      pBindAttribLocation;
+static PFNGLLINKPROGRAMPROC             pLinkProgram;
+static PFNGLUSEPROGRAMPROC              pUseProgram;
+static PFNGLGETUNIFORMLOCATIONPROC      pGetUniformLocation;
+static PFNGLUNIFORMMATRIX4FVPROC        pUniformMatrix4fv;
+static PFNGLUNIFORM4FPROC               pUniform4f;
+static PFNGLDELETESHADERPROC            pDeleteShader;
+
+template<class T> static bool load(T& fp, const char* nm) {
+    fp = (T)SDL_GL_GetProcAddress(nm); return fp != nullptr;
+}
+static void init() {
+    g_tried = true;
+    bool ok = load(pGenBuffers,"glGenBuffers") && load(pBindBuffer,"glBindBuffer")
+        && load(pBufferData,"glBufferData") && load(pGenVertexArrays,"glGenVertexArrays")
+        && load(pBindVertexArray,"glBindVertexArray") && load(pEnableVertexAttribArray,"glEnableVertexAttribArray")
+        && load(pVertexAttribPointer,"glVertexAttribPointer") && load(pCreateShader,"glCreateShader")
+        && load(pShaderSource,"glShaderSource") && load(pCompileShader,"glCompileShader")
+        && load(pCreateProgram,"glCreateProgram") && load(pAttachShader,"glAttachShader")
+        && load(pBindAttribLocation,"glBindAttribLocation") && load(pLinkProgram,"glLinkProgram")
+        && load(pUseProgram,"glUseProgram") && load(pGetUniformLocation,"glGetUniformLocation")
+        && load(pUniformMatrix4fv,"glUniformMatrix4fv") && load(pUniform4f,"glUniform4f")
+        && load(pDeleteShader,"glDeleteShader");
+    if (!ok) return;
+    const char* vs = "#version 130\nin vec3 aPos;\nuniform mat4 uMVP;\n"
+                     "void main(){ gl_Position = uMVP*vec4(aPos,1.0); }\n";
+    const char* fs = "#version 130\nuniform vec4 uColor;\nout vec4 frag;\n"
+                     "void main(){ frag = uColor; }\n";
+    GLuint v = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(v,1,&vs,nullptr); pCompileShader(v);
+    GLuint f = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(f,1,&fs,nullptr); pCompileShader(f);
+    g_prog = pCreateProgram(); pAttachShader(g_prog,v); pAttachShader(g_prog,f);
+    pBindAttribLocation(g_prog,0,"aPos"); pLinkProgram(g_prog);
+    pDeleteShader(v); pDeleteShader(f);
+    g_uMVP = pGetUniformLocation(g_prog,"uMVP"); g_uColor = pGetUniformLocation(g_prog,"uColor");
+    pGenVertexArrays(1,&g_vao); pGenBuffers(1,&g_vbo); pGenBuffers(1,&g_ebo);
+    pBindVertexArray(g_vao);
+    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
+    pEnableVertexAttribArray(0);
+    pVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,(const void*)0);
+    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
+    pBindVertexArray(0);
+    g_ok = true;
+}
+static void upload(const std::vector<float>& verts, const std::vector<uint32_t>& edges) {
+    if (!g_ok) return;
+    pBindVertexArray(g_vao);
+    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
+    pBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size()*sizeof(float)), verts.data(), GL_STATIC_DRAW);
+    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
+    pBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(edges.size()*sizeof(uint32_t)), edges.data(), GL_STATIC_DRAW);
+    pBindVertexArray(0);
+    g_edge_count = (GLsizei)edges.size();
+}
+struct DrawParams { float mvp[16]; float col[4]; int vx, vy, vw, vh; };
+static DrawParams g_dp;
+// Runs inside ImGui's render pass (one GL draw call). ImDrawCallback_ResetRenderState
+// (queued right after) restores ImGui's own GL state.
+static void draw_cb(const ImDrawList*, const ImDrawCmd*) {
+    if (!g_ok || g_edge_count == 0) return;
+    GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
+    glViewport(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
+    glEnable(GL_SCISSOR_TEST); glScissor(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    pUseProgram(g_prog);
+    pUniformMatrix4fv(g_uMVP, 1, GL_FALSE, g_dp.mvp);
+    pUniform4f(g_uColor, g_dp.col[0], g_dp.col[1], g_dp.col[2], g_dp.col[3]);
+    pBindVertexArray(g_vao);
+    glDrawElements(GL_LINES, g_edge_count, GL_UNSIGNED_INT, (const void*)0);
+    pBindVertexArray(0);
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
+}
+// column-major 4x4 helpers
+static void m_perspective(float* m, float fovy, float aspect, float zn, float zf) {
+    float f = 1.0f / tanf(fovy*0.5f);
+    for (int i = 0; i < 16; ++i) m[i] = 0.0f;
+    m[0]=f/aspect; m[5]=f; m[10]=(zf+zn)/(zn-zf); m[11]=-1.0f; m[14]=(2.0f*zf*zn)/(zn-zf);
+}
+static void m_lookat(float* m, float ex,float ey,float ez) {   // look at origin, up +Y
+    float fx=-ex, fy=-ey, fz=-ez; float fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl<1e-6f)fl=1; fx/=fl;fy/=fl;fz/=fl;
+    float sx=-fz, sy=0.0f, sz=fx;                                      // right = cross(forward,+Y)
+    float sl=sqrtf(sx*sx+sy*sy+sz*sz); if(sl<1e-6f){sx=1;sy=0;sz=0;sl=1;} sx/=sl;sy/=sl;sz/=sl;
+    float ux=sy*fz-sz*fy, uy=sz*fx-sx*fz, uz=sx*fy-sy*fx;              // up = cross(right,forward)
+    m[0]=sx; m[4]=sy; m[8]=sz;  m[12]=-(sx*ex+sy*ey+sz*ez);
+    m[1]=ux; m[5]=uy; m[9]=uz;  m[13]=-(ux*ex+uy*ey+uz*ez);
+    m[2]=-fx;m[6]=-fy;m[10]=-fz;m[14]=(fx*ex+fy*ey+fz*ez);
+    m[3]=0;  m[7]=0;  m[11]=0;  m[15]=1;
+}
+static void m_mul(float* o, const float* a, const float* b) {  // o = a*b
+    for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r)
+        o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
+}
+} // namespace meshgl
+
 static void mesh_preview_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(380, 400), ImGuiCond_FirstUseEver);
@@ -1232,6 +1353,18 @@ static void mesh_preview_panel(void)
             cx = (lo[0]+hi[0])*0.5f; cy = (lo[1]+hi[1])*0.5f; cz = (lo[2]+hi[2])*0.5f;
             extent = std::max(std::max(hi[0]-lo[0], hi[1]-lo[1]), hi[2]-lo[2]) * 0.5f;
             if (extent < 1e-4f) extent = 1.0f;
+            // Upload the normalized line geometry to the GPU once (per selection/LOD).
+            if (!meshgl::g_tried) meshgl::init();
+            if (meshgl::g_ok) {
+                const float s = 1.0f / extent;
+                std::vector<float> nv(wire.verts.size());
+                for (size_t i = 0; i + 3 <= wire.verts.size(); i += 3) {
+                    nv[i+0] = (wire.verts[i+0] - cx) * s;
+                    nv[i+1] = (wire.verts[i+1] - cy) * s;
+                    nv[i+2] = (wire.verts[i+2] - cz) * s;
+                }
+                meshgl::upload(nv, wire.edges);
+            }
         }
     }
     if (!g_sel_addr)        { ImGui::TextDisabled("left-click an object to select it"); ImGui::End(); return; }
@@ -1266,28 +1399,49 @@ static void mesh_preview_panel(void)
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(p0, p1, true);
     dl->AddRectFilled(p0, p1, IM_COL32(8, 10, 18, 255));
-    Camera3D pc; pc.yaw = g_mesh_yaw; pc.pitch = g_mesh_pitch; pc.dist = g_mesh_dist;
-    const float s = 1.0f / extent;                    // normalize model to ~unit size
-    // Project each UNIQUE vertex once (the naive per-edge projection re-transforms
-    // every shared vertex ~6x), and draw the lines with AA off — both are CPU
-    // draw-list costs that dominate on dense meshes (the GPU draws the batch in one
-    // call regardless).
-    size_t vc = wire.verts.size() / 3;
-    static std::vector<ImVec2> sp; static std::vector<unsigned char> vis;
-    sp.resize(vc); vis.resize(vc);
-    for (size_t i = 0; i < vc; ++i) {
-        float dep;
-        vis[i] = project3d(pc, ctr, focal, (wire.verts[i*3+0] - cx) * s,
-                           (wire.verts[i*3+1] - cy) * s, (wire.verts[i*3+2] - cz) * s, sp[i], dep) ? 1 : 0;
+
+    if (meshgl::g_ok) {
+        // GPU path: projection happens on the GPU via an MVP uniform; one draw call.
+        float cp = cosf(g_mesh_pitch), sp = sinf(g_mesh_pitch);
+        float cyw = cosf(g_mesh_yaw), syw = sinf(g_mesh_yaw);
+        float ex = g_mesh_dist*cp*syw, ey = g_mesh_dist*sp, ez = g_mesh_dist*cp*cyw;
+        float V[16], P[16];
+        meshgl::m_lookat(V, ex, ey, ez);
+        meshgl::m_perspective(P, 0.9f, av.x / av.y, 0.02f, 1000.0f);
+        meshgl::m_mul(meshgl::g_dp.mvp, P, V);
+        meshgl::g_dp.col[0] = 120/255.0f; meshgl::g_dp.col[1] = 200/255.0f;
+        meshgl::g_dp.col[2] = 1.0f;       meshgl::g_dp.col[3] = 0.55f;
+        ImGuiIO& io = ImGui::GetIO();
+        float fx = io.DisplayFramebufferScale.x, fy = io.DisplayFramebufferScale.y;
+        int fbh = (int)(io.DisplaySize.y * fy);
+        meshgl::g_dp.vx = (int)(p0.x * fx);
+        meshgl::g_dp.vw = (int)(av.x  * fx);
+        meshgl::g_dp.vh = (int)(av.y  * fy);
+        meshgl::g_dp.vy = fbh - (int)(p1.y * fy);
+        dl->AddCallback(meshgl::draw_cb, nullptr);
+        dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);   // restore ImGui GL state
+    } else {
+        // CPU fallback (GL entrypoints unavailable): project each unique vertex once,
+        // AA-off lines.
+        Camera3D pc; pc.yaw = g_mesh_yaw; pc.pitch = g_mesh_pitch; pc.dist = g_mesh_dist;
+        const float s = 1.0f / extent;
+        size_t vc = wire.verts.size() / 3;
+        static std::vector<ImVec2> sp2; static std::vector<unsigned char> vis;
+        sp2.resize(vc); vis.resize(vc);
+        for (size_t i = 0; i < vc; ++i) {
+            float dep;
+            vis[i] = project3d(pc, ctr, focal, (wire.verts[i*3+0] - cx) * s,
+                               (wire.verts[i*3+1] - cy) * s, (wire.verts[i*3+2] - cz) * s, sp2[i], dep) ? 1 : 0;
+        }
+        bool aa = (dl->Flags & ImDrawListFlags_AntiAliasedLines) != 0;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedLines;
+        for (size_t e = 0; e + 1 < wire.edges.size(); e += 2) {
+            uint32_t i0 = wire.edges[e], i1 = wire.edges[e + 1];
+            if (i0 < vc && i1 < vc && vis[i0] && vis[i1])
+                dl->AddLine(sp2[i0], sp2[i1], IM_COL32(120, 200, 255, 110), 1.0f);
+        }
+        if (aa) dl->Flags |= ImDrawListFlags_AntiAliasedLines;
     }
-    bool aa = (dl->Flags & ImDrawListFlags_AntiAliasedLines) != 0;
-    dl->Flags &= ~ImDrawListFlags_AntiAliasedLines;
-    for (size_t e = 0; e + 1 < wire.edges.size(); e += 2) {
-        uint32_t i0 = wire.edges[e], i1 = wire.edges[e + 1];
-        if (i0 < vc && i1 < vc && vis[i0] && vis[i1])
-            dl->AddLine(sp[i0], sp[i1], IM_COL32(120, 200, 255, 110), 1.0f);
-    }
-    if (aa) dl->Flags |= ImDrawListFlags_AntiAliasedLines;
     dl->PopClipRect();
     ImGui::End();
 }
