@@ -24,4 +24,9 @@ std::string handle_request(const Mem& mem, const std::string& line);
 // Read-only: the handler only reads memory via `mem`.
 void start_debug_server(const Mem& mem, int port = 7373);
 
+// Call once per frame on the MAIN render thread. Services any pending socket
+// command against live memory while the game is between frames (so the walk
+// doesn't race the engine's mutation). Cheap no-op when nothing is pending.
+void debug_server_pump();
+
 } // namespace x3

@@ -7,12 +7,50 @@
 #include <cstring>
 #include <sstream>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 namespace x3 {
+
+// Game memory mutates on the main render thread. Walking those live structures
+// from the server's background thread races with that mutation and can hand
+// snprintf a corrupted name -> SIGSEGV. So the server thread does NO memory
+// access itself: it posts the command here and blocks until the MAIN thread (via
+// debug_server_pump(), called once per frame between renders) services it against
+// a consistent snapshot. One request is in flight at a time.
+namespace {
+struct Handoff {
+    std::mutex              m;
+    std::condition_variable cv;
+    bool        req_pending = false;
+    bool        resp_ready  = false;
+    std::string req;
+    std::string resp;
+    Mem         mem;
+};
+Handoff g_handoff;
+
+// Server thread: hand the line to the main thread, wait (bounded) for the answer.
+std::string dispatch_on_main(const std::string& line) {
+    std::unique_lock<std::mutex> lk(g_handoff.m);
+    g_handoff.req = line;
+    g_handoff.resp.clear();
+    g_handoff.resp_ready = false;
+    g_handoff.req_pending = true;
+    g_handoff.cv.notify_all();
+    if (!g_handoff.cv.wait_for(lk, std::chrono::seconds(2),
+                               [] { return g_handoff.resp_ready; })) {
+        g_handoff.req_pending = false;
+        return "err timeout (game not rendering?)";
+    }
+    return g_handoff.resp;
+}
+} // namespace
 
 // Accepts "0x..", decimal, and sums like "0x1f6f8d10+0x6c" (so callers can write
 // base+offset directly).
@@ -206,7 +244,7 @@ std::string handle_request(const Mem &mem, const std::string &line) {
     return "err unknown op";
 }
 
-static void server_thread(Mem mem, int port) {
+static void server_thread(int port) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) return;
     int yes = 1;
@@ -237,7 +275,7 @@ static void server_thread(Mem mem, int port) {
                 std::string ln = acc.substr(0, nl);
                 acc.erase(0, nl + 1);
                 if (!ln.empty() && ln.back() == '\r') ln.pop_back();
-                std::string resp = handle_request(mem, ln);
+                std::string resp = dispatch_on_main(ln);   // serviced on the main thread
                 resp.push_back('\n');
                 if (send(c, resp.data(), resp.size(), MSG_NOSIGNAL) < 0) { r = -1; break; }
             }
@@ -247,11 +285,27 @@ static void server_thread(Mem mem, int port) {
     }
 }
 
+// Main thread: service one pending request against live memory, between frames.
+void debug_server_pump() {
+    std::unique_lock<std::mutex> lk(g_handoff.m);
+    if (!g_handoff.req_pending || g_handoff.resp_ready) return;
+    std::string line = g_handoff.req;
+    Mem mem = g_handoff.mem;
+    lk.unlock();
+    std::string r = handle_request(mem, line);   // safe: synchronized with the game
+    lk.lock();
+    g_handoff.resp = std::move(r);
+    g_handoff.resp_ready  = true;
+    g_handoff.req_pending = false;
+    g_handoff.cv.notify_all();
+}
+
 void start_debug_server(const Mem &mem, int port) {
     static bool started = false;
     if (started) return;
     started = true;
-    std::thread(server_thread, mem, port).detach();
+    { std::lock_guard<std::mutex> lk(g_handoff.m); g_handoff.mem = mem; }
+    std::thread(server_thread, port).detach();
 }
 
 } // namespace x3

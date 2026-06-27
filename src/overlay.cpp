@@ -1107,6 +1107,11 @@ static void map3d_panel(void)
 
 static void overlay_draw(void)
 {
+    // Service any pending debug-socket command here, on the main thread, so its
+    // memory walk is synchronized with the game (the server thread no longer
+    // touches game memory itself — that race used to crash the game).
+    x3::debug_server_pump();
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
