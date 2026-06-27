@@ -1091,12 +1091,9 @@ static void init() {
         "#version 130\n"
         "in vec3 vN; in vec3 vP; uniform vec4 uColor; out vec4 frag;\n"
         "void main(){ vec3 N=normalize(vN); vec3 V=normalize(-vP);\n"
-        "  float ndv=max(dot(N,V),0.0);\n"
-        "  float lit=0.30+0.70*ndv;\n"                              // headlight lambert -> shows facing
-        "  float fres=pow(1.0-ndv,3.0);\n"                          // grazing rim glow
-        "  vec3 c=uColor.rgb*lit + vec3(0.55,0.85,1.0)*fres*0.45;\n"// cyan-ish holo rim
-        "  float a=clamp(uColor.a*(0.70+0.45*fres),0.0,1.0);\n"     // translucent but solid enough to read pose
-        "  frag=vec4(c,a); }\n";
+        "  float f=pow(1.0-clamp(abs(dot(N,V)),0.0,1.0),2.5);\n"   // fresnel rim (near & far faces)
+        "  float i=0.18+0.9*f;\n"                                   // base fill + rim gain
+        "  frag=vec4(uColor.rgb*i, uColor.a*i); }\n";
     GLuint sv = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(sv,1,&svs,nullptr); pCompileShader(sv);
     GLuint sf = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(sf,1,&sfs,nullptr); pCompileShader(sf);
     g_sprog = pCreateProgram(); pAttachShader(g_sprog,sv); pAttachShader(g_sprog,sf);
@@ -1184,12 +1181,8 @@ static void solid_cb(const ImDrawList*, const ImDrawCmd*) {
     GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
     glViewport(g_svx,g_svy,g_svw,g_svh);
     glEnable(GL_SCISSOR_TEST); glScissor(g_svx,g_svy,g_svw,g_svh);
-    // Own depth buffer for the viewer region so near faces occlude far ones -> the hull's
-    // 3D pose (heading/roll) is readable. Depth mask must be on for glClear(depth).
-    glDepthMask(GL_TRUE); glClearDepth(1.0); glClear(GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  // translucent, not additive
-    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);    // additive holo glow
+    glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDisable(GL_CULL_FACE);
     pUseProgram(g_sprog);
     for (const auto& s : g_solids) {                          // far->near
         if (!s.h || !s.h->icount) continue;
@@ -1200,7 +1193,7 @@ static void solid_cb(const ImDrawList*, const ImDrawCmd*) {
         glDrawElements(GL_TRIANGLES,s.h->icount,GL_UNSIGNED_INT,(const void*)0);
     }
     pBindVertexArray(0);
-    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
     glDisable(GL_SCISSOR_TEST);
     glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
 }
@@ -1544,6 +1537,21 @@ static void map3d_panel(void)
             dl->AddLine(ImVec2(c.x-r,c.y+r), ImVec2(c.x-r,c.y+r-L), bc, 1.6f);
             dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r-L,c.y+r), bc, 1.6f);
             dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r,c.y+r-L), bc, 1.6f);
+            // orientation gizmo (selected only): forward/up/right axes so heading AND roll
+            // are directly visible. Axes are Rl*local-axis, i.e. aligned with the hull.
+            uint32_t sroot = 0; float SR[9];
+            if (x3::read_object_root(emem, o.addr, sroot) && x3::read_node_orient(emem, sroot, 0x3c, SR)) {
+                float len = e.depth * 0.10f; const float Fp[3] = {1.0f,-1.0f,-1.0f};
+                auto axis = [&](int cc, ImU32 col2) {        // cc = column = local axis index
+                    float ax=SR[0*3+cc], ay=SR[1*3+cc], az=SR[2*3+cc];
+                    ImVec2 ts; float td;
+                    if (PROJ(KX(o.x)+Fp[0]*ax*len, KY(o.y)+Fp[1]*ay*len, KZ(o.z)+Fp[2]*az*len, ts, td))
+                        dl->AddLine(c, ts, col2, 1.8f);
+                };
+                axis(0, IM_COL32(255,110,110,200));          // right   = red
+                axis(1, IM_COL32(255,230, 90,235));          // up      = yellow (roll)
+                axis(2, IM_COL32( 90,200,255,235));          // forward = cyan
+            }
         }
         bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
                     o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
