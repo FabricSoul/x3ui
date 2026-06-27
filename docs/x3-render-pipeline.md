@@ -150,6 +150,53 @@ recursion, so `scene+0x3c` is the **fixed ROOT orientation**, not a per-parent a
 each node's `+0xac` is `local(+0x3c) × root`, already a *full world* orient — our overlay is
 right to treat `+0xac` as world (no parent chaining needed), it just needs the transpose.
 
+## World transform is SIM-maintained, not render-gated (D) — off-screen objects are live
+
+The per-frame VISIBLE bit `+0x118&2` is per-frame (stale off-screen) and gates *drawing*
+and the LOD/variant *selector* — but it does NOT gate the world TRANSFORM. The cached world
+transform `+0x9c`/`+0xac` is refreshed for EVERY in-sector node every frame, before any
+culling, so **it is live even for off-screen objects**.
+
+- `object_physics_update_transforms`@0x08105aa0 (called from world tick FUN_080e6c20) writes
+  the node LOCAL pos `+0x2c` and LOCAL orient `+0x3c` each tick — physics path, no render
+  gate. (D)
+- `sim_sector_refresh_object_world_transforms`@0x08073fe0 (called from
+  `render_all_sectors_frame`@0x080697f1, once per sector, looping every node with NO
+  `+0x118&2` / frustum gate) copies local→world: `+0x9c..+0xa8 = +0x2c..+0x38` and
+  `+0xac..+0xd8 = +0x3c..+0x68`, then calls
+  `node_compose_child_world_transforms_recursive`@0x08073040 to propagate to children. (D)
+- Consequence: **for a normal top-level object `world_orient == node+0x3c` (identity sector
+  frame); `world_pos == node+0x2c`.** `render_object` only overwrites `+0xac` for
+  special-flag nodes (`+0x118` & {0x20 billboard, 0x4000 scene/camera-slaved, 0x10000000
+  animated, 0x200 reortho}); ordinary ships/stations set none of these. The `0x4000` branch
+  slaves orient to `scene+0x3c` = the CAMERA basis (`S_3DStartRender_setCamera`@0x08161730),
+  i.e. cockpit/HUD nodes, not world objects. (D)
+
+### Parent→child LOCAL composition (D) — `node_compose_child_world_transforms_recursive`@0x08073040
+To reproduce `+0xac`/`+0x9c` offline (no render cache), for parent P (world known) and each
+child C in `P+0xc` (next=`*C`):
+```
+C.world_orient = (C.flags & 0x10004020) ? C.local_orient(+0x3c)
+                                        : mat3x3_mul3x3_fixed(C+0x3c, P+0xac)   # row-major A·B
+C.world_pos    = P.world_pos(+0x9c)
+               + scale ⊙ ( colmajor(P+0xac) · C.local_pos(+0x2c, RAW) )         # colmajor: out_i=Σj M[j*0x10+i*4]·v_j
+   scale = (P[0x11a]&1==0) ? P.per_axis_scale(+0x70/74/78)
+                           : (C.flags&0x40 ? P.size_scalar(+0x6c) : 1)          # componentwise fixed16_mul
+```
+Root object: `world = local` (parent = identity sector frame). `mat3x3_mul3x3_fixed`@0x080bfd00
+(row-major), `mat3x3_transform_vec_fixed_colmajor`@0x080bee90.
+
+**Design consequence (overlay):** geometry can be read ONCE per object, un-rotated into body
+frame by `root+0x3c`, then placed every frame from the LIVE `root+0x3c` (orient) + `root+0x2c`
+(pos) — correct on- and off-screen. Only the off-screen LOD *selector* (draw-all fallback)
+remains imperfect. See `docs/superpowers/specs/2026-06-27-holographic-solid-hulls-design.md`.
+
+New Ghidra renames: `sim_sector_refresh_object_world_transforms`@0x08073fe0,
+`node_compose_child_world_transforms_recursive`@0x08073040,
+`node_set_per_axis_scale_recursive`@0x080830a0,
+`node_compute_motion_blur_spin_from_local_delta`@0x080840a0,
+`object_physics_update_transforms`@0x08105aa0.
+
 ## Model load / why something may not render
 
 `render_object` resolves a node's model with `model_load_resolve(node+0x12c)` **once
