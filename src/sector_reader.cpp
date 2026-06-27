@@ -156,8 +156,12 @@ Mat34 node_world_xform(const Mem& mem, uint32_t node, int32_t rwx, int32_t rwy, 
     if (size == 0.0f) size = 1.0f;
     float R[3][3];
     uint32_t rbits = 0;
+    // The engine lays +0xac/+0xb0/+0xb4 ... out as the COLUMNS of the GL matrix
+    // (column-major), so v_obj[i] = sum_j orient[+0xac + j*0x10 + i*4] * v_j. Read the
+    // 3x3 TRANSPOSED (swap i/j in the offset) so our row-major mat_apply matches the
+    // engine — otherwise rotated attachments (turrets) are mis-oriented & mis-placed.
     for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) { int32_t r = gi(0xac + i * 0x10 + j * 4); rbits |= (uint32_t)r; R[i][j] = r / 65536.0f; }
+        for (int j = 0; j < 3; ++j) { int32_t r = gi(0xac + j * 0x10 + i * 4); rbits |= (uint32_t)r; R[i][j] = r / 65536.0f; }
     if (rbits == 0) { R[0][0] = R[1][1] = R[2][2] = 1.0f; R[0][1]=R[0][2]=R[1][0]=R[1][2]=R[2][0]=R[2][1]=0.0f; }
     Mat34 m{};
     for (int i = 0; i < 3; ++i) { m.m[i*4+0] = R[i][0]*size; m.m[i*4+1] = R[i][1]*size; m.m[i*4+2] = R[i][2]*size; }
