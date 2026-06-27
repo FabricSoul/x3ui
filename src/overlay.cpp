@@ -716,6 +716,9 @@ static void map_filter_bar(int* filter)
     ImGui::RadioButton("other", filter, MF_OTHER);
 }
 
+static ImU32       faction_color(const x3::ObjInfo& o);   // defined with the 3D map
+static const char* relation_label(int8_t rel);
+
 // Read-only panel: list the objects in the player's current sector.
 static void map_panel(void)
 {
@@ -804,11 +807,14 @@ static void map_panel(void)
             ImGui::TableNextRow();
             ImGui::PushID((int)o.id);
             ImGui::TableSetColumnIndex(COL_NAME);
+            ImGui::PushStyleColor(ImGuiCol_Text, faction_color(o));   // EVE-style faction tint
             ImGui::Selectable(o.name.empty() ? "(unnamed)" : o.name.c_str(), false,
                               ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+            ImGui::PopStyleColor();
             if (ImGui::BeginPopupContextItem("row")) {       // right-click the row
-                ImGui::TextDisabled("%s  (%s)", o.name.empty() ? "(unnamed)" : o.name.c_str(),
-                                    x3::type_label(o.type));
+                const char* rel = relation_label(o.relation);
+                ImGui::TextDisabled("%s  (%s%s%s)", o.name.empty() ? "(unnamed)" : o.name.c_str(),
+                                    x3::type_label(o.type), *rel ? ", " : "", rel);
                 ImGui::Separator();
                 char idbuf[32]; snprintf(idbuf, sizeof idbuf, "%u", o.id);
                 if (ImGui::MenuItem("Copy id")) ImGui::SetClipboardText(idbuf);
@@ -878,6 +884,30 @@ static ImU32 type_color(int16_t t)
     }
 }
 
+// Faction color, matching the game's blip IFF coloring (own/friend/neutral/enemy).
+// Objects with no faction (gates/suns/asteroids/...) keep their structural type color.
+static ImU32 faction_color(const x3::ObjInfo& o)
+{
+    switch (o.relation) {
+        case x3::REL_OWN:     return IM_COL32(255,  90, 255, 255); // magenta
+        case x3::REL_FRIEND:  return IM_COL32( 90, 150, 255, 255); // blue
+        case x3::REL_ENEMY:   return IM_COL32(255,  70,  70, 255); // red
+        case x3::REL_NEUTRAL: return IM_COL32(110, 215,  90, 255); // green
+        default:              return type_color(o.type);
+    }
+}
+
+static const char* relation_label(int8_t rel)
+{
+    switch (rel) {
+        case x3::REL_OWN:     return "own";
+        case x3::REL_FRIEND:  return "friend";
+        case x3::REL_ENEMY:   return "enemy";
+        case x3::REL_NEUTRAL: return "neutral";
+        default:              return "";
+    }
+}
+
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
@@ -902,6 +932,9 @@ static void map3d_panel(void)
 
     static int map3d_filter = MF_ALL;   // independent of the table's filter
     map_filter_bar(&map3d_filter);
+    static bool follow = false;         // lock the camera yaw to the ship's heading
+    ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+    ImGui::Checkbox("follow ship", &follow);
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 64.0f || avail.y < 64.0f) { ImGui::End(); return; }
@@ -913,12 +946,16 @@ static void map3d_panel(void)
 
     ImGui::InvisibleButton("canvas3d", avail);
     bool hov = ImGui::IsItemHovered();
-    if (ImGui::IsItemActive()) {                       // left-drag orbits
+    if (ImGui::IsItemActive()) {                       // left-drag orbits (pitch only in follow)
         ImVec2 d = ImGui::GetIO().MouseDelta;
-        cam.yaw   -= d.x * 0.008f;
+        if (!follow) cam.yaw -= d.x * 0.008f;
         cam.pitch += d.y * 0.008f;
         cam.pitch = cam.pitch >  1.50f ?  1.50f : (cam.pitch < -1.50f ? -1.50f : cam.pitch);
     }
+    // Follow mode: lock the orbit yaw to the ship's heading so its nose points "into"
+    // the view (heading from the forward vector's X/Z; flip the sign to taste).
+    if (follow && view.player_orient_valid)
+        cam.yaw = atan2f(view.player_fwd_x, view.player_fwd_z);
     if (hov) {                                         // wheel zooms (dolly)
         float wh = ImGui::GetIO().MouseWheel;
         if (wh != 0.0f) cam.dist *= powf(0.85f, wh);
@@ -970,7 +1007,7 @@ static void map3d_panel(void)
     }
     std::sort(ps.begin(), ps.end(), [](const PObj& a, const PObj& b){ return a.depth > b.depth; });
     for (const auto& e : ps) {
-        const auto& o = *e.o; ImU32 col = type_color(o.type);
+        const auto& o = *e.o; ImU32 col = faction_color(o);
         if (e.gok) {
             dl->AddLine(e.ground, e.s, (col & 0x00FFFFFFu) | 0x55000000u, 1.0f);
             dl->AddCircleFilled(e.ground, 1.6f, (col & 0x00FFFFFFu) | 0x66000000u); // ground tick
@@ -1006,9 +1043,11 @@ static void map3d_panel(void)
             if (d2 < bd2) { bd2 = d2; best = e.o; }
         }
         if (best) {
+            const char* rel = relation_label(best->relation);
             ImGui::BeginTooltip();
-            ImGui::Text("%s  (%s)", best->name.empty() ? "(unnamed)" : best->name.c_str(),
-                        x3::type_label(best->type));
+            ImGui::TextColored(ImColor(faction_color(*best)), "%s  (%s%s%s)",
+                               best->name.empty() ? "(unnamed)" : best->name.c_str(),
+                               x3::type_label(best->type), *rel ? ", " : "", rel);
             ImGui::Text("id %u   type %d/%d", best->id, (int)best->type, (int)best->subtype);
             if (best->dist >= 0) ImGui::Text("dist %.1f km", best->dist / U);
             ImGui::Text("pos %.1f, %.1f, %.1f km", best->x / U, best->y / U, best->z / U);

@@ -238,11 +238,38 @@ static void test_gate_dest_name() {
     CHECK_STR(v.objects[0].name.c_str(), "-> Argon Prime");
 }
 
+// IFF relation matches the game: friend/foe via payload masks (bit = 1<<player_race),
+// own via payload owner == player owner.
+static void test_iff_relation() {
+    FakeMem fm;
+    fm.w(0x2000 + 0x50, 0x3000);     // sector payload
+    fm.w(0x3000 + 0x00, 0x4000);     // head -> ship A
+    fm.w(0x4000 + 0x00, 0x5000); fm.w(0x4000 + 0x48, 7);
+    fm.w(0x4000 + 0x50, 0x4100); fm.w(0x4100 + 0x48, 0x2);   // friendMask bit1
+    fm.w(0x5000 + 0x00, 0x6000); fm.w(0x5000 + 0x48, 7);
+    fm.w(0x5000 + 0x50, 0x5100); fm.w(0x5100 + 0x4c, 0x2);   // foeMask bit1
+    fm.w(0x6000 + 0x00, 0x7000); fm.w(0x6000 + 0x48, 7);
+    fm.w(0x6000 + 0x50, 0x6100); fm.w(0x6100 + 0x48, 0x0);   // neither -> neutral
+    fm.w(0x7000 + 0x00, 0x3004); fm.w(0x7000 + 0x48, 7);     // -> sentinel
+    fm.w(0x7000 + 0x50, 0x7100); fm.w(0x7100 + 0x0c, 0x1234);// owner == player owner
+
+    x3::RangeCtx rc;
+    rc.player_race  = 1;             // bit 0x2
+    rc.player_owner = 0x1234;
+    auto objs = x3::read_sector_objects(fm.mem(), 0x2000, 4096, &rc);
+    CHECK_EQ(objs.size(), (size_t)4);
+    CHECK_EQ((int)objs[0].relation, (int)x3::REL_FRIEND);
+    CHECK_EQ((int)objs[1].relation, (int)x3::REL_ENEMY);
+    CHECK_EQ((int)objs[2].relation, (int)x3::REL_NEUTRAL);
+    CHECK_EQ((int)objs[3].relation, (int)x3::REL_OWN);
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
     RUN(test_scanner_range_filter);
     RUN(test_gate_dest_name);
+    RUN(test_iff_relation);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);

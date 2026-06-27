@@ -9,6 +9,10 @@
 
 namespace x3 {
 
+// IFF relation to the player, matching the game's blip coloring. REL_NONE = an
+// object with no faction (gate/sun/planet/asteroid/ware/...).
+enum Relation { REL_NONE = 0, REL_NEUTRAL, REL_FRIEND, REL_ENEMY, REL_OWN };
+
 struct ObjInfo {
     uint32_t    id      = 0;
     std::string name;
@@ -16,6 +20,8 @@ struct ObjInfo {
     int16_t     subtype = 0;
     int32_t     x = 0, y = 0, z = 0; // raw position words (interpret int or float)
     int32_t     dist    = -1;        // distance from the player (raw units); -1 if unknown
+    int16_t     race    = -1;        // owner/race id (obj+0x3c); -1 if unknown
+    int8_t      relation = REL_NONE; // IFF relation to the player (see Relation)
 };
 
 // Abstraction over the game's 32-bit address space, so the walk is testable.
@@ -34,15 +40,19 @@ struct SectorView {
     int64_t              scanner_range = 0;   // gravidar scanner range (raw units; 0 = unknown)
     bool                 player_valid  = false;
     int32_t              player_x = 0, player_y = 0, player_z = 0;  // player pos (raw units)
+    bool                 player_orient_valid = false;
+    float                player_fwd_x = 0, player_fwd_y = 0, player_fwd_z = 1; // ship forward (unit, +Z nose)
 };
 
 // Player position + scanner range, for the gravidar visibility test (ships beyond
 // the scanner range are hidden, matching the in-game sector map). `valid` false =
 // no range filtering applied.
 struct RangeCtx {
-    bool    valid = false;
-    int32_t px = 0, py = 0, pz = 0;   // player position (raw units, 500000/km)
-    int64_t range = 0;                // scanner range (raw units)
+    bool     valid = false;
+    int32_t  px = 0, py = 0, pz = 0;  // player position (raw units, 500000/km)
+    int64_t  range = 0;               // scanner range (raw units)
+    int16_t  player_race  = -1;       // player ship race id (for the IFF relation)
+    uint32_t player_owner = 0;        // player owner id (== own assets); 0 = unknown
 };
 
 // Convenience alias to the scene-global address (aliases the single source of

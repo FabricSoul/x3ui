@@ -98,6 +98,30 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
                 if (!dest.empty()) o.name = "-> " + dest;
             }
 
+            // Owner/race + IFF relation to the player (matches the game's blip color):
+            // only ships/stations/factories carry a relation; +0x44 bit30 disables it.
+            uint32_t rw = 0;
+            if (ru32(mem, node + off::OBJ_RACE, rw)) o.race = (int16_t)(rw & 0xFFFF);
+            bool has_iff = (o.type == off::TYPE_SHIP || o.type == off::TYPE_STATION ||
+                            o.type == off::TYPE_FACTORY) && !(f44 & off::NO_IFF_FLAG);
+            if (rc && has_iff) {
+                uint32_t pl = 0;
+                if (ru32(mem, node + off::OBJ_PAYLOAD, pl) && pl) {
+                    uint32_t own = 0;
+                    if (rc->player_owner && ru32(mem, pl + off::PAYLOAD_OWNER, own) &&
+                        own == rc->player_owner) {
+                        o.relation = REL_OWN;
+                    } else if (rc->player_race >= 0 && rc->player_race < 32) {
+                        uint32_t fr = 0, fo = 0, bit = 1u << rc->player_race;
+                        ru32(mem, pl + off::REL_FRIEND_MASK, fr);
+                        ru32(mem, pl + off::REL_FOE_MASK, fo);
+                        o.relation = (fr & bit) ? REL_FRIEND
+                                   : (fo & bit) ? REL_ENEMY
+                                                : REL_NEUTRAL;
+                    }
+                }
+            }
+
             // Distance from the player (for display + the scanner-range gate).
             if (rc && rc->valid) {
                 int64_t dx = (int64_t)o.x - rc->px;
@@ -128,6 +152,14 @@ static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
     RangeCtx rc;
     uint32_t player = 0, ptf = 0, px = 0, py = 0, pz = 0;
     if (!ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, player) || !player) return rc;
+
+    // Player race + owner for the IFF relation (set even if the scanner range below
+    // can't be resolved -> coloring still works without range filtering).
+    uint32_t prace = 0, ppl = 0, pown = 0;
+    if (ru32(mem, player + off::OBJ_RACE, prace)) rc.player_race = (int16_t)(prace & 0xFFFF);
+    if (ru32(mem, player + off::OBJ_PAYLOAD, ppl) && ppl &&
+        ru32(mem, ppl + off::PAYLOAD_OWNER, pown)) rc.player_owner = pown;
+
     if (!ru32(mem, player + off::OBJ_TRANSFORM, ptf) || !ptf) return rc;
     if (!ru32(mem, ptf + off::TF_X, px) || !ru32(mem, ptf + off::TF_Y, py) ||
         !ru32(mem, ptf + off::TF_Z, pz)) return rc;
@@ -205,6 +237,15 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
             ru32(mem, ptf + off::TF_Z, pz)) {
             v.player_valid = true;
             v.player_x = (int32_t)px; v.player_y = (int32_t)py; v.player_z = (int32_t)pz;
+            // Ship forward vector (transform-node 3x3, 16.16 fixed; forward = column 2).
+            uint32_t fx = 0, fy = 0, fz = 0;
+            if (ru32(mem, ptf + off::TF_FWD_X, fx) && ru32(mem, ptf + off::TF_FWD_Y, fy) &&
+                ru32(mem, ptf + off::TF_FWD_Z, fz)) {
+                v.player_orient_valid = true;
+                v.player_fwd_x = (int32_t)fx / off::FIXED16;
+                v.player_fwd_y = (int32_t)fy / off::FIXED16;
+                v.player_fwd_z = (int32_t)fz / off::FIXED16;
+            }
         }
     }
     v.objects = read_sector_objects(mem, sector, cap, &rc);
