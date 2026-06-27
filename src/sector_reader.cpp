@@ -103,7 +103,7 @@ namespace {
 // 3x4 affine transform, row-major; column 3 is translation.
 struct Mat34 { float m[12]; };
 Mat34 mat_identity() { Mat34 r{}; r.m[0] = r.m[5] = r.m[10] = 1.0f; return r; }
-Mat34 mat_mul(const Mat34& a, const Mat34& b) {  // a then b's parent: a ∘ b
+Mat34 mat_mul(const Mat34& a, const Mat34& b) {  // result(v) = a(b(v)): compose child b into parent a's space
     Mat34 r{};
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j)
@@ -127,10 +127,10 @@ constexpr float kTransDiv = 16384.0f;
 Mat34 node_local(const Mem& mem, uint32_t node) {
     auto gi = [&](uint32_t off) -> int32_t { uint32_t v = 0; ru32(mem, node + off, v); return (int32_t)v; };
     float R[3][3];
-    int32_t rsum = 0;
+    uint32_t rbits = 0;   // OR of the raw 3x3 fields; 0 only if every field is 0
     for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) { int32_t r = gi(0x3c + i * 0x10 + j * 4); rsum |= (r < 0 ? -r : r); R[i][j] = r / 65536.0f; }
-    if (rsum == 0) { R[0][0] = R[1][1] = R[2][2] = 1.0f; R[0][1]=R[0][2]=R[1][0]=R[1][2]=R[2][0]=R[2][1]=0.0f; } // not a transform node -> identity
+        for (int j = 0; j < 3; ++j) { int32_t r = gi(0x3c + i * 0x10 + j * 4); rbits |= (uint32_t)r; R[i][j] = r / 65536.0f; }
+    if (rbits == 0) { R[0][0] = R[1][1] = R[2][2] = 1.0f; R[0][1]=R[0][2]=R[1][0]=R[1][2]=R[2][0]=R[2][1]=0.0f; } // not a transform node -> identity
     float s0 = gi(0x70) / 65536.0f, s1 = gi(0x74) / 65536.0f, s2 = gi(0x78) / 65536.0f;
     if (s0 == 0.0f && s1 == 0.0f && s2 == 0.0f) { s0 = s1 = s2 = 1.0f; }
     Mat34 m{};
@@ -168,11 +168,11 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
             size_t nv = part.verts.size() / 3;
             bool bad = false;
             std::vector<float> tv; tv.reserve(nv * 3);
-            for (size_t i = 0; i < nv && !bad; ++i) {
+            for (size_t i = 0; i < nv; ++i) {
                 float ox, oy, oz;
                 mat_apply(f.m, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
                 if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
-                    std::fabs(ox) > 1e6f || std::fabs(oy) > 1e6f || std::fabs(oz) > 1e6f) bad = true;
+                    std::fabs(ox) > 1e6f || std::fabs(oy) > 1e6f || std::fabs(oz) > 1e6f) { bad = true; break; }
                 tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
             }
             if (!bad) {
