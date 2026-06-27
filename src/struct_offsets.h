@@ -84,4 +84,12 @@ constexpr uint32_t GRAVIDAR_SOURCE = 0x10;        // scanner source == player sh
 constexpr uint32_t GRAVIDAR_RANGE  = 0x240;       // cached scanner range (int, 500000/km)
 constexpr uint32_t FLAG_KNOWN      = 0x8;         // +0x40 bit3: known/scanned (skips range)
 
+// Player current target (HUD targeting brackets) — fields on the gravidar/HUD object,
+// plus the engine setter. See memory x3ui-player-target.
+constexpr uint32_t GRAVIDAR_TARGET        = 0x1bc;        // *: current target OBJECT POINTER
+constexpr uint32_t GRAVIDAR_TARGET_MODE   = 0x1c0;        // i16: 0 clear, 3 lock+brackets
+constexpr uint32_t GRAVIDAR_SET_TARGET_FN = 0x08131d10u;  // void __cdecl(gravidar, i16 mode, void* targetObj)
+constexpr int16_t  TARGET_MODE_LOCK       = 3;            // lock + brackets (+ NotifyTargetLock)
+constexpr int16_t  TARGET_MODE_CLEAR      = 0;            // clear target
+
 }} // namespace x3::off
