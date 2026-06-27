@@ -19,6 +19,7 @@ Each feature gets a **spec** (what/why/architecture, from brainstorming) and a *
 | Sector-map readout | `superpowers/specs/2026-06-26-x3-sector-map-readout-design.md` | `superpowers/plans/2026-06-26-x3-sector-map-readout.md` | done |
 | Object wireframe | `superpowers/specs/2026-06-27-x3-object-wireframe-design.md` | `superpowers/plans/2026-06-27-x3-object-wireframe.md` | done |
 | Holographic solid hulls (3D map) | `superpowers/specs/2026-06-27-holographic-solid-hulls-design.md` | `superpowers/plans/2026-06-27-holographic-solid-hulls.md` | done (`feat/sector-map`) |
+| Target bridge (overlay ⇄ game target) | `superpowers/specs/2026-06-27-target-bridge-design.md` | _(pending)_ | design |
 
 ## Where new docs go
 - A deep, verified engine recipe/finding → append to **x3-render-pipeline.md**, tagged **(D)/(L)**.
