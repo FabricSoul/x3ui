@@ -43,6 +43,7 @@
 #include "backends/imgui_impl_opengl3.h"
 #include "sector_reader.h"
 #include "debug_server.h"
+#include "mesh_render.h"
 
 #define X3UI_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -740,8 +741,9 @@ static const char* relation_label(int8_t rel);
 // Current selection (the object the user left-clicked in the table or 3D map).
 // select_target() is the single place that will also write the engine's
 // current-target field once that RE lands (the address is RE'd separately).
-static uint32_t g_sel_id   = 0;
-static uint32_t g_sel_addr = 0;
+static uint32_t g_sel_id    = 0;
+static uint32_t g_sel_addr  = 0;
+static bool     g_sel_alive = false;   // selected addr confirmed in the live object list
 static void select_target(const x3::ObjInfo& o)
 {
     g_sel_id   = o.id;
@@ -960,6 +962,12 @@ static void map3d_panel(void)
         ImGui::End();
         return;
     }
+    // Confirm the selected object is still live (so the mesh preview can't deref a
+    // despawned pointer).
+    g_sel_alive = false;
+    if (g_sel_addr)
+        for (const auto& o : view.objects)
+            if (o.addr == g_sel_addr) { g_sel_alive = true; break; }
 
     static Camera3D cam;
 
@@ -1176,6 +1184,61 @@ static void map3d_panel(void)
     ImGui::End();
 }
 
+// ---- experimental: render the selected object's real engine mesh -----------
+static bool   g_mesh_on   = false;
+static float  g_mesh_dist = 200000.0f;   // orbit distance (object world units; tune live)
+static float  g_mesh_yaw  = 0.7f, g_mesh_pitch = 0.3f;
+static bool   g_mesh_spin = true;
+static ImVec4 g_mesh_rect = ImVec4(0, 0, 0, 0);  // preview area (ImGui screen coords)
+
+static void mesh_preview_panel(void)
+{
+    ImGui::SetNextWindowSize(ImVec2(360, 380), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("x3ui - mesh preview (exp)")) { ImGui::End(); g_mesh_rect = ImVec4(0,0,0,0); return; }
+    ImGui::Checkbox("render mesh", &g_mesh_on); ImGui::SameLine();
+    ImGui::Checkbox("spin", &g_mesh_spin);
+    if (g_sel_id && g_sel_alive) ImGui::Text("target: #%u", g_sel_id);
+    else if (g_sel_id)           ImGui::TextDisabled("target #%u not in this sector", g_sel_id);
+    else                         ImGui::TextDisabled("left-click an object to select it");
+    ImGui::DragFloat("dist", &g_mesh_dist, g_mesh_dist * 0.02f + 1.0f, 1.0f, 5e8f, "%.0f");
+    ImGui::TextDisabled("drag below to orbit");
+
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImVec2 av = ImGui::GetContentRegionAvail();
+    if (av.x > 16 && av.y > 16) {
+        ImGui::InvisibleButton("meshcanvas", av);
+        if (ImGui::IsItemActive()) {
+            ImVec2 d = ImGui::GetIO().MouseDelta;
+            g_mesh_yaw   -= d.x * 0.01f;
+            g_mesh_pitch += d.y * 0.01f;
+            g_mesh_spin = false;
+        }
+        if (g_mesh_spin) g_mesh_yaw += ImGui::GetIO().DeltaTime * 0.6f;
+        ImGui::GetWindowDrawList()->AddRect(p0, ImVec2(p0.x + av.x, p0.y + av.y),
+                                            IM_COL32(60, 80, 120, 120));
+        g_mesh_rect = ImVec4(p0.x, p0.y, av.x, av.y);
+    } else g_mesh_rect = ImVec4(0, 0, 0, 0);
+    ImGui::End();
+}
+
+// Called after ImGui has drawn, so the engine mesh paints on top of the panel.
+static void mesh_preview_render(void)
+{
+    if (!g_mesh_on || !g_sel_addr || !g_sel_alive) return;
+    if (g_mesh_rect.z < 8 || g_mesh_rect.w < 8) return;
+    ImGuiIO& io = ImGui::GetIO();
+    float sx = io.DisplayFramebufferScale.x, sy = io.DisplayFramebufferScale.y;
+    float fb_h = io.DisplaySize.y * sy;
+    x3::MeshView mv;
+    mv.gx = (int)(g_mesh_rect.x * sx);
+    mv.gw = (int)(g_mesh_rect.z * sx);
+    mv.gh = (int)(g_mesh_rect.w * sy);
+    mv.gy = (int)(fb_h - (g_mesh_rect.y * sy + mv.gh));   // flip top-left -> GL bottom-left
+    mv.yaw = g_mesh_yaw; mv.pitch = g_mesh_pitch; mv.dist = g_mesh_dist;
+    mv.clear_depth = true;
+    x3::mesh_render_object(g_sel_addr, mv);
+}
+
 static void overlay_draw(void)
 {
     ImGui_ImplOpenGL3_NewFrame();
@@ -1232,9 +1295,11 @@ static void overlay_draw(void)
     ship_window();
     map_panel();
     map3d_panel();
+    mesh_preview_panel();
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    mesh_preview_render();   // engine mesh on top of the preview panel (default off)
 }
 
 // ---- interposed: per-frame buffer swap -----------------------------------
