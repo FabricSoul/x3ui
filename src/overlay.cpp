@@ -1583,12 +1583,6 @@ static void map3d_panel(void)
                 axis(2, IM_COL32( 90,200,255,235));          // forward = cyan
             }
         }
-        if (view.current_target_addr && o.addr == view.current_target_addr) {  // live game target reticle
-            float tr = (e.hull ? std::max(e.rpx, 10.0f) : 9.0f) + 7.0f;
-            ImU32 tc = IM_COL32(255,170,40,230);
-            dl->AddCircle(e.s, tr, tc, 28, 1.8f);
-            dl->AddCircle(e.s, tr * 0.6f, tc, 24, 1.2f);
-        }
         bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
                     o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
                     o.type==x3::off::TYPE_PLANET);
