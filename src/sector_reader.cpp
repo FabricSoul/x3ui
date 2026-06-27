@@ -76,6 +76,7 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
 
         if (!hidden) {
             ObjInfo o;
+            o.addr = node;
             uint32_t w = 0;
             if (ru32(mem, node + off::OBJ_ID, w)) o.id = w;
             if (ru32(mem, node + off::OBJ_TYPE, w)) {

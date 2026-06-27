@@ -719,6 +719,19 @@ static void map_filter_bar(int* filter)
 static ImU32       faction_color(const x3::ObjInfo& o);   // defined with the 3D map
 static const char* relation_label(int8_t rel);
 
+// Current selection (the object the user left-clicked in the table or 3D map).
+// select_target() is the single place that will also write the engine's
+// current-target field once that RE lands (the address is RE'd separately).
+static uint32_t g_sel_id   = 0;
+static uint32_t g_sel_addr = 0;
+static void select_target(const x3::ObjInfo& o)
+{
+    g_sel_id   = o.id;
+    g_sel_addr = o.addr;
+    // TODO(target-bridge): write the engine's current-target global so the game's
+    // targeting brackets follow this object.
+}
+
 // Read-only panel: list the objects in the player's current sector.
 static void map_panel(void)
 {
@@ -808,8 +821,10 @@ static void map_panel(void)
             ImGui::PushID((int)o.id);
             ImGui::TableSetColumnIndex(COL_NAME);
             ImGui::PushStyleColor(ImGuiCol_Text, faction_color(o));   // EVE-style faction tint
-            ImGui::Selectable(o.name.empty() ? "(unnamed)" : o.name.c_str(), false,
-                              ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+            if (ImGui::Selectable(o.name.empty() ? "(unnamed)" : o.name.c_str(),
+                                  o.id == g_sel_id,
+                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
+                select_target(o);                                    // left-click sets target
             ImGui::PopStyleColor();
             if (ImGui::BeginPopupContextItem("row")) {       // right-click the row
                 const char* rel = relation_label(o.relation);
@@ -1015,6 +1030,12 @@ static void map3d_panel(void)
         float rad = 70.0f / e.depth; rad = rad < 1.5f ? 1.5f : (rad > 9.0f ? 9.0f : rad);
         dl->AddCircleFilled(e.s, rad*2.4f, (col & 0x00FFFFFFu) | 0x22000000u);
         dl->AddCircleFilled(e.s, rad, col);
+        if (o.id == g_sel_id) {                              // selection brackets
+            float r = rad + 5.0f;
+            dl->AddCircle(e.s, r, IM_COL32(255, 255, 255, 235), 0, 1.6f);
+            dl->AddLine(ImVec2(e.s.x - r - 2, e.s.y), ImVec2(e.s.x - r + 3, e.s.y), IM_COL32(255,255,255,235), 1.6f);
+            dl->AddLine(ImVec2(e.s.x + r - 3, e.s.y), ImVec2(e.s.x + r + 2, e.s.y), IM_COL32(255,255,255,235), 1.6f);
+        }
         bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
                     o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
                     o.type==x3::off::TYPE_PLANET);
@@ -1052,6 +1073,11 @@ static void map3d_panel(void)
             if (best->dist >= 0) ImGui::Text("dist %.1f km", best->dist / U);
             ImGui::Text("pos %.1f, %.1f, %.1f km", best->x / U, best->y / U, best->z / U);
             ImGui::EndTooltip();
+            // Left-click (not an orbit drag) selects/targets the object under the cursor.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                ImVec2 dd = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                if (fabsf(dd.x) + fabsf(dd.y) < 4.0f) select_target(*best);
+            }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 ctx_obj = *best; ctx_have = true; ImGui::OpenPopup("obj3d_ctx");
             }

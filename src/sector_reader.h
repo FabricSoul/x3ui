@@ -15,6 +15,7 @@ enum Relation { REL_NONE = 0, REL_NEUTRAL, REL_FRIEND, REL_ENEMY, REL_OWN };
 
 struct ObjInfo {
     uint32_t    id      = 0;
+    uint32_t    addr    = 0;         // live engine node address (for actions: set-target, etc.)
     std::string name;
     int16_t     type    = 0;
     int16_t     subtype = 0;
