@@ -189,14 +189,16 @@ std::string handle_request(const Mem &mem, const std::string &line) {
     if (op == "sector") {
         SectorView v = read_current_sector(mem);
         if (!v.in_sector) return "ok in_sector=0";
-        snprintf(b, sizeof b, "ok in_sector=1 addr=0x%08x name=\"%s\" count=%zu",
-                 v.sector_addr, v.sector_name.c_str(), v.objects.size());
+        snprintf(b, sizeof b,
+                 "ok in_sector=1 addr=0x%08x name=\"%s\" count=%zu scanner_range=%lld",
+                 v.sector_addr, v.sector_name.c_str(), v.objects.size(),
+                 (long long)v.scanner_range);
         std::string r = b;
         int i = 0;
         for (const auto &o : v.objects) {
-            if (i++ >= 128) break;
-            snprintf(b, sizeof b, "\n  id=%u type=%d sub=%d name=\"%s\" pos=%d,%d,%d",
-                     o.id, (int)o.type, (int)o.subtype, o.name.c_str(), o.x, o.y, o.z);
+            if (i++ >= 256) break;
+            snprintf(b, sizeof b, "\n  id=%u type=%d sub=%d name=\"%s\" pos=%d,%d,%d dist=%d",
+                     o.id, (int)o.type, (int)o.subtype, o.name.c_str(), o.x, o.y, o.z, o.dist);
             r += b;
         }
         return r;

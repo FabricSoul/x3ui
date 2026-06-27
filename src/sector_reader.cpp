@@ -2,6 +2,7 @@
 #include "struct_offsets.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace x3 {
 
@@ -63,15 +64,17 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
                 if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
             }
 
-            // Scanner-range gate: ships beyond the player's scanner range are hidden
-            // (matching the gravidar), unless the object is already known (+0x40&0x8).
-            bool out_of_range = false;
-            if (rc && rc->valid && o.type == off::TYPE_SHIP && !(f40 & off::FLAG_KNOWN)) {
+            // Distance from the player (for display + the scanner-range gate).
+            if (rc && rc->valid) {
                 int64_t dx = (int64_t)o.x - rc->px;
                 int64_t dy = (int64_t)o.y - rc->py;
                 int64_t dz = (int64_t)o.z - rc->pz;
-                out_of_range = (dx * dx + dy * dy + dz * dz) > rc->range * rc->range;
+                o.dist = (int32_t)std::llround(std::sqrt((double)(dx*dx + dy*dy + dz*dz)));
             }
+            // Ships beyond the scanner range are hidden (matching the gravidar),
+            // unless the object is already known (+0x40 & 0x8).
+            bool out_of_range = (rc && rc->valid && o.type == off::TYPE_SHIP &&
+                                 !(f40 & off::FLAG_KNOWN) && (int64_t)o.dist > rc->range);
             if (!out_of_range)
                 out.push_back(std::move(o));
         }
@@ -158,6 +161,7 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     if (ru32(mem, sector + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
         v.sector_name = mem.cstr(nameptr, 64);
     RangeCtx rc = resolve_range_ctx(mem, scene);
+    v.scanner_range = rc.valid ? rc.range : 0;
     v.objects = read_sector_objects(mem, sector, cap, &rc);
 
     // Stable display order by object id, so the live 6 Hz refresh doesn't reshuffle

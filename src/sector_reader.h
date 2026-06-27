@@ -15,6 +15,7 @@ struct ObjInfo {
     int16_t     type    = 0;
     int16_t     subtype = 0;
     int32_t     x = 0, y = 0, z = 0; // raw position words (interpret int or float)
+    int32_t     dist    = -1;        // distance from the player (raw units); -1 if unknown
 };
 
 // Abstraction over the game's 32-bit address space, so the walk is testable.
@@ -30,6 +31,7 @@ struct SectorView {
     uint32_t             sector_addr = 0;
     std::string          sector_name;
     std::vector<ObjInfo> objects;
+    int64_t              scanner_range = 0;   // gravidar scanner range (raw units; 0 = unknown)
 };
 
 // Player position + scanner range, for the gravidar visibility test (ships beyond

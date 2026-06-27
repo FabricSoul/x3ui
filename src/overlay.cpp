@@ -716,9 +716,10 @@ static void map_panel(void)
         else if (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY) ++n_stations;
     }
 
-    ImGui::Text("sector: %s   (%zu objects: %d ships, %d stations)",
+    ImGui::Text("sector: %s   (%zu objects: %d ships, %d stations)   scanner %.0f km",
                 view.sector_name.empty() ? "(unnamed)" : view.sector_name.c_str(),
-                view.objects.size(), n_ships, n_stations);
+                view.objects.size(), n_ships, n_stations,
+                view.scanner_range / x3::off::UNITS_PER_KM);
 
     // Filter categories: 0 = all, 1 = ships (type 7), 2 = stations (type 5/6).
     static int filter = 0;
@@ -732,12 +733,13 @@ static void map_panel(void)
 
     // Fill the rest of the window so the whole list is visible (resize the window
     // to see more; the size persists via imgui.ini).
-    if (ImGui::BeginTable("objs", 4,
+    if (ImGui::BeginTable("objs", 5,
             ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg,
             ImVec2(0, ImGui::GetContentRegionAvail().y))) {
         ImGui::TableSetupColumn("id");
         ImGui::TableSetupColumn("type");
         ImGui::TableSetupColumn("name");
+        ImGui::TableSetupColumn("dist (km)");
         ImGui::TableSetupColumn("pos (km)");
         ImGui::TableHeadersRow();
         for (const auto& o : view.objects) {
@@ -750,6 +752,9 @@ static void map_panel(void)
             ImGui::TableNextColumn(); ImGui::Text("%s(%d)", x3::type_label(o.type), o.type);
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(o.name.empty() ? "(unnamed)" : o.name.c_str());
+            ImGui::TableNextColumn();
+            if (o.dist >= 0) ImGui::Text("%.1f", o.dist / x3::off::UNITS_PER_KM);
+            else             ImGui::TextDisabled("-");
             ImGui::TableNextColumn();
             ImGui::Text("%.1f, %.1f, %.1f", o.x / x3::off::UNITS_PER_KM,
                         o.y / x3::off::UNITS_PER_KM, o.z / x3::off::UNITS_PER_KM);
