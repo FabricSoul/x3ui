@@ -188,66 +188,36 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
                       if (ru32(mem, root + 0xa4, t)) rwz = (int32_t)t; }
 
     std::unordered_set<uint32_t> seen;
-    std::vector<uint32_t> stack;                // node addresses; no transform accumulation
+    std::vector<uint32_t> stack;                       // node addresses (traversal)
+    std::vector<uint32_t> cand_node, cand_flags;       // collected drawable candidates + their +0x118
+    bool has_visible = false;                          // any candidate with the +0x118&2 visible bit
     stack.push_back(root);
     seen.insert(root);
     size_t visited = 0;
 
+    // Pass 1: traverse the scene graph; collect drawable candidates (real model id;
+    // primitive proxies < min_model_id skipped). Children are always traversed.
     while (!stack.empty() && visited < node_cap) {
         uint32_t node = stack.back(); stack.pop_back();
         ++visited;
 
-        // Draw real models (id >= min_model_id skips primitive proxies); the per-part
-        // collision gate inside read_node_mesh skips parts with no render-part. We
-        // still TRAVERSE every node's children regardless (matches render_object).
         uint32_t pid = 0; ru32(mem, node + 0x12c, pid);
-        MeshWire part;
-        if ((int32_t)pid >= 0 && pid >= min_model_id)
-            part = read_node_mesh(mem, node, lod_level, /*gate_parts=*/true, vcap, ecap);
-        if (part.ok) {
-            if (stats) { stats->resolved++; stats->sum_resolved_v += part.verts.size() / 3; }
-            // Hard cap: append a part only if the whole part fits (keeps edges valid).
-            if (out.verts.size() / 3 + part.verts.size() / 3 <= vcap &&
-                out.edges.size() / 2 + part.edges.size() / 2 <= ecap) {
-                Mat34 M = node_world_xform(mem, node, rwx, rwy, rwz);   // engine cached world, rel root
-                uint32_t base = (uint32_t)(out.verts.size() / 3);
-                size_t nv = part.verts.size() / 3;
-                bool bad = false;
-                std::vector<float> tv; tv.reserve(nv * 3);
-                for (size_t i = 0; i < nv; ++i) {
-                    float ox, oy, oz;
-                    mat_apply(M, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
-                    if (stats) {
-                        float mc = std::fabs(ox);
-                        if (std::fabs(oy) > mc) mc = std::fabs(oy);
-                        if (std::fabs(oz) > mc) mc = std::fabs(oz);
-                        if (mc > stats->max_coord) stats->max_coord = mc;
-                    }
-                    // World coords can be ~1e6-1e7 (size scalar); only reject true garbage.
-                    if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
-                        std::fabs(ox) > 1e9f || std::fabs(oy) > 1e9f || std::fabs(oz) > 1e9f) { bad = true; break; }
-                    tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
-                }
-                if (!bad) {
-                    if (stats) stats->kept++;
-                    for (float v : tv) out.verts.push_back(v);
-                    for (uint32_t e : part.edges) out.edges.push_back(base + e);
-                } else if (stats) stats->dropped_guard++;
-            }
+        if ((int32_t)pid >= 0 && pid >= min_model_id) {
+            uint32_t fl = 0; ru32(mem, node + 0x118, fl);
+            cand_node.push_back(node); cand_flags.push_back(fl);
+            if (fl & 2u) has_visible = true;
         }
 
-        // Traverse children (child +0x0c, sibling +0x00). Prune candidates whose LOCAL
-        // transform (+0x3c) is insane — a leaf's stale pointer into non-node memory reads
-        // as random rotation/scale (|.|≈±32768) and would exhaust the node budget.
-        uint32_t c = 0;
-        ru32(mem, node + 0x0c, c);
+        // Prune children whose LOCAL transform (+0x3c) is insane — a leaf's stale
+        // pointer into non-node memory reads as random rotation/scale (|.|≈±32768).
+        uint32_t c = 0; ru32(mem, node + 0x0c, c);
         for (size_t g = 0; c && g < node_cap; ++g) {
-            if (c < 0x1000u || (c & 3u) != 0u) break;            // null / small-int / misaligned
+            if (c < 0x1000u || (c & 3u) != 0u) break;
             if (seen.insert(c).second) {
                 Mat34 lc = node_local(mem, c);
                 bool sane = true;
                 for (int k = 0; k < 12 && sane; ++k) {
-                    float lim = (k == 3 || k == 7 || k == 11) ? 1e4f : 16.0f;  // translation vs rot/scale
+                    float lim = (k == 3 || k == 7 || k == 11) ? 1e4f : 16.0f;
                     if (!std::isfinite(lc.m[k]) || std::fabs(lc.m[k]) > lim) sane = false;
                 }
                 if (sane) stack.push_back(c);
@@ -256,6 +226,46 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
         }
     }
     if (stats) stats->nodes = visited;
+
+    // Pass 2: draw. The engine draws a node only when its per-frame VISIBLE bit
+    // (+0x118 & 2) is set — that bit also picks the active LOD among sibling variants
+    // and excludes internal / docked / LOD-far nodes. If the object is on-screen (any
+    // candidate visible) honor it exactly; if off-screen (the bit is stale-cleared on
+    // every node) fall back to drawing all real models so the preview isn't blank.
+    for (size_t ci = 0; ci < cand_node.size(); ++ci) {
+        if (has_visible && !(cand_flags[ci] & 2u)) continue;
+        uint32_t node = cand_node[ci];
+        MeshWire part = read_node_mesh(mem, node, lod_level, /*gate_parts=*/true, vcap, ecap);
+        if (!part.ok) continue;
+        if (stats) { stats->resolved++; stats->sum_resolved_v += part.verts.size() / 3; }
+        // Hard cap: append a part only if the whole part fits (keeps edge indices valid).
+        if (out.verts.size() / 3 + part.verts.size() / 3 > vcap ||
+            out.edges.size() / 2 + part.edges.size() / 2 > ecap) continue;
+        Mat34 M = node_world_xform(mem, node, rwx, rwy, rwz);   // engine cached world, rel root
+        uint32_t base = (uint32_t)(out.verts.size() / 3);
+        size_t nv = part.verts.size() / 3;
+        bool bad = false;
+        std::vector<float> tv; tv.reserve(nv * 3);
+        for (size_t i = 0; i < nv; ++i) {
+            float ox, oy, oz;
+            mat_apply(M, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
+            if (stats) {
+                float mc = std::fabs(ox);
+                if (std::fabs(oy) > mc) mc = std::fabs(oy);
+                if (std::fabs(oz) > mc) mc = std::fabs(oz);
+                if (mc > stats->max_coord) stats->max_coord = mc;
+            }
+            // World coords can be ~1e6-1e7 (size scalar); only reject true garbage.
+            if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
+                std::fabs(ox) > 1e9f || std::fabs(oy) > 1e9f || std::fabs(oz) > 1e9f) { bad = true; break; }
+            tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
+        }
+        if (!bad) {
+            if (stats) stats->kept++;
+            for (float v : tv) out.verts.push_back(v);
+            for (uint32_t e : part.edges) out.edges.push_back(base + e);
+        } else if (stats) stats->dropped_guard++;
+    }
     out.ok = !out.verts.empty();
     return out;
 }

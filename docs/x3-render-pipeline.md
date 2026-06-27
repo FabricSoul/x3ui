@@ -24,9 +24,16 @@ render_object(node):
   for child in node+0xc list (next=*child):    # recurse ALWAYS (even if not drawn)
      render_object(child)
 ```
-- **Node visible gate `node+0x118 & 2`:** per-FRAME visibility (frustum/cull). (L:
-  on-screen station hull=0x1001002 has it; off-screen ships have it CLEAR → if we gate
-  on it, off-screen objects vanish.) **For a static orbit preview we must NOT use it.**
+- **Node visible gate `node+0x118 & 2`:** the engine draws a node ONLY if this bit is
+  set. It is per-FRAME (frustum/cull) AND it is the engine's runtime SELECTOR — it picks
+  the active LOD among sibling variants and excludes internal / docked / LOD-far nodes.
+  (L, diag9: the Equipment Dock's actual drawn set is exactly its `&2` nodes — the
+  `901000003` dock-LOD variants and a docked-ship-shaped `19011/19080` cluster are
+  `&2=0`; on-screen hull `21524=0x1001002` has it.) The overlay uses it **HYBRID**: if
+  ANY node in the object has `&2` (object on-screen) we gate on it and match the engine
+  exactly; if NONE do (off-screen, the bit is stale-cleared everywhere) we fall back to
+  drawing all real models so the preview isn't blank (it may then show extra LOD/internal
+  geometry until the object is brought on-screen).
 - **LOD:** the engine uses the cached index `node+0x138` into `(model+0xc)[idx]`; it
   does not recompute per draw. Clamp to `[0, *(short*)(model+0x10))`. `node+0x138 == -1`
   ⇒ no mesh. (D)
