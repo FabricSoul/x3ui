@@ -618,6 +618,8 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
         v.sector_name = mem.cstr(nameptr, 64);
     RangeCtx rc = resolve_range_ctx(mem, scene);
     v.scanner_range = rc.valid ? rc.range : 0;
+    if (rc.gravidar_addr)
+        ru32(mem, rc.gravidar_addr + off::GRAVIDAR_TARGET, v.current_target_addr);
     // Player position for the 3D map center (independent of scanner range).
     {
         uint32_t player = 0, ptf = 0, px = 0, py = 0, pz = 0;

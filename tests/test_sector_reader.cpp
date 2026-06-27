@@ -589,6 +589,30 @@ static void test_vertex_normals() {
     }
 }
 
+// read_current_sector should surface the gravidar's current target ptr (+0x1bc).
+static void test_current_target_readback() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);            // scene
+    fm.w(0x1000 + 0x08, 0x2000);         // sector
+    fm.w(0x1000 + 0x38, 0x8000);         // player ship
+    fm.w(0x2000 + 0x48, 1);              // sector type
+    fm.w(0x2000 + 0x50, 0x3000);         // payload
+    fm.w(0x3000 + 0x00, 0x3004);         // empty list (head -> sentinel)
+    fm.w(0x8000 + 0x6c, 0x8100);         // player transform node
+    fm.w(0x8100 + 0x2c, 0); fm.w(0x8100 + 0x30, 0); fm.w(0x8100 + 0x34, 0);  // player pos
+    fm.w(0x0837a100, 0x9000);            // HUD mgr -> ... -> gravidar
+    fm.w(0x9000 + 0x00, 0x9100);
+    fm.w(0x9100 + 0x00, 0x9200);
+    fm.w(0x9100 + 0x04, 0);
+    fm.w(0x9200 + 0x00, 0x9300);
+    fm.w(0x9300 + 0x08, 0x9400);
+    fm.w(0x9400 + 0x10, 0x8000);         // source == player
+    fm.w(0x9400 + 0x1bc, 0x4242);        // current target pointer
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK(v.in_sector);
+    CHECK_EQ(v.current_target_addr, 0x4242u);
+}
+
 // The gravidar object = the g_hud_mgr hashmap entry whose scanner source == player ship.
 static void test_find_player_gravidar() {
     FakeMem fm;
@@ -611,6 +635,7 @@ int main() {
     RUN(test_visibility_filter);
     RUN(test_scanner_range_filter);
     RUN(test_find_player_gravidar);
+    RUN(test_current_target_readback);
     RUN(test_gate_dest_name);
     RUN(test_iff_relation);
     RUN(test_text_db_resolve);

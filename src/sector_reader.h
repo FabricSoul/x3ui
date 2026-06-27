@@ -46,6 +46,7 @@ struct SectorView {
     std::string          sector_name;
     std::vector<ObjInfo> objects;
     int64_t              scanner_range = 0;   // gravidar scanner range (raw units; 0 = unknown)
+    uint32_t current_target_addr = 0;   // game's live HUD target (gravidar+0x1bc); 0 = none
     bool                 player_valid  = false;
     int32_t              player_x = 0, player_y = 0, player_z = 0;  // player pos (raw units)
     bool                 player_orient_valid = false;
