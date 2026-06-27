@@ -80,19 +80,29 @@ std::string handle_request(const Mem &mem, const std::string &line) {
 
     if (op == "ping") return "pong";
 
-    if (op == "meshscene") {   // live render-scene state (for the mesh preview)
-        uint32_t world = 0, scene = 0, view = 0, sc = 0, vp = 0, flag = 0;
-        uint32_t cx = 0, cy = 0, cz = 0, v0 = 0, v1 = 0, v2 = 0, v3 = 0;
+    if (op == "meshscene") {   // resolve the active render scene like mesh_render does
+        uint32_t world = 0, view = 0, scene = 0;
         u32(0x082a0640, world);
-        if (world) u32(world + 0x64, scene);
-        if (scene) { u32(scene + 0x1c, view); u32(scene + 0x244, flag); u32(scene + 0x24c, vp);
-                     u32(scene + 0x2c, cx); u32(scene + 0x30, cy); u32(scene + 0x34, cz); }
-        if (view) u32(view + 0x2c, sc);
+        if (world) u32(world + 0x64, view);
+        uint32_t node = 0; if (world) u32(world + 0x18, node);
+        for (int si = 0; si < 64 && node && !scene; ++si) {
+            uint32_t sc = 0; u32(node + 0x1c, sc);
+            for (int sj = 0; sj < 64 && sc; ++sj) {
+                uint32_t v = 0, fl = 0, vp2 = 0;
+                u32(sc + 0x1c, v); u32(sc + 0x244, fl); u32(sc + 0x24c, vp2);
+                if (v == view && (fl & 1) && vp2) { scene = sc; break; }
+                uint32_t nx = 0; u32(sc, nx); sc = nx;
+            }
+            uint32_t nn = 0; u32(node, nn); node = nn;
+        }
+        uint32_t vp = 0, scf_w = 0, cx = 0, cy = 0, cz = 0, v0 = 0, v1 = 0, v2 = 0, v3 = 0;
+        if (scene) { u32(scene + 0x24c, vp); u32(scene + 0x2c, cx); u32(scene + 0x30, cy); u32(scene + 0x34, cz); }
+        if (view) u32(view + 0x2c, scf_w);
         if (vp) { u32(vp, v0); u32(vp + 4, v1); u32(vp + 8, v2); u32(vp + 12, v3); }
-        float scf; memcpy(&scf, &sc, 4);
+        float scf; memcpy(&scf, &scf_w, 4);
         snprintf(b, sizeof b,
-                 "ok world=0x%x scene=0x%x view=0x%x render=%d scale=%g vp=0x%x[%d,%d,%d,%d] cam=%d,%d,%d",
-                 world, scene, view, (int)(flag & 1), scf, vp,
+                 "ok world=0x%x view=0x%x scene=0x%x scale=%g vp=0x%x[%d,%d,%d,%d] cam=%d,%d,%d",
+                 world, view, scene, scf, vp,
                  (int)v0, (int)v1, (int)v2, (int)v3, (int)cx, (int)cy, (int)cz);
         return b;
     }

@@ -146,15 +146,26 @@ bool mesh_render_object(uint32_t obj, const MeshView& mv) {
     load_gl();
     if (!g.ok || !obj) return false;
 
-    uint32_t world = rd32(G_WORLD_ROOT_PTR);   // deref: g_world_root is a pointer
-    if (!world) return false;
-    uint32_t scene = rd32(world + 0x64);
+    auto okptr = [](uint32_t a) { return a >= 0x01000000u && a < 0xf0000000u && (a & 3) == 0; };
+    uint32_t world = rd32(G_WORLD_ROOT_PTR);        // deref: g_world_root is a pointer
+    if (!okptr(world)) return false;
+    uint32_t view = rd32(world + 0x64);             // *(world+0x64) is the player VIEW (sector node)
+    if (!okptr(view)) return false;
+
+    // The active scene is the renderable one whose view (+0x1c) is the player view,
+    // with a valid viewport pointer (+0x24c). Scan the sector list (world+0x18).
+    uint32_t scene = 0;
+    for (uint32_t node = rd32(world + 0x18), si = 0; okptr(node) && si < 64 && !scene; ++si) {
+        for (uint32_t sc = rd32(node + 0x1c), sj = 0; okptr(sc) && sj < 64; ++sj) {
+            if (rd32(sc + 0x1c) == view && (rd32(sc + 0x244) & 1) && okptr(rd32(sc + 0x24c))) {
+                scene = sc; break;
+            }
+            sc = rd32(sc);
+        }
+        node = rd32(node);
+    }
     if (!scene) return false;
-    if (!(rd32(scene + 0x244) & 1)) return false;   // scene must be renderable (in flight)
-    uint32_t view = rd32(scene + 0x1c);
-    if (!view) return false;
-    uint32_t vp = rd32(scene + 0x24c);              // null in menus/map -> setCamera would crash
-    if (!vp) return false;
+    uint32_t vp = rd32(scene + 0x24c);
 
     // Orbit target = object's world position (the values the renderer reads).
     int32_t ox = (int32_t)rd32(obj + 0x9c);
