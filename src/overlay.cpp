@@ -1272,6 +1272,11 @@ static void map3d_panel(void)
         cam.yaw = 0.7f; cam.pitch = 0.5f; cam.dist = 70.0f;
     }
     ImGui::SameLine(); ImGui::TextDisabled("dbl-click focus · MMB pan");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(70);
+    ImGui::SliderInt("hull LOD", &g_map_lod, 0, 6);
+    hull_gc(view.objects);
+    int hull_budget = 2;                 // expensive geometry reads per frame
+    meshgl::g_solids.clear();
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 64.0f || avail.y < 64.0f) { ImGui::End(); return; }
@@ -1337,6 +1342,29 @@ static void map3d_panel(void)
         return project3d(cam, ctr, focal, wx - cam.cx, wy - cam.cy, wz - cam.cz, s, d);
     };
 
+    // GPU hull placement (matches project3d's basis so hulls sit on their blips).
+    auto build_view = [&](float Vm[16]) {
+        float cp=cosf(cam.pitch), sp=sinf(cam.pitch), cyw=cosf(cam.yaw), syw=sinf(cam.yaw);
+        float ex=cam.dist*cp*syw, ey=cam.dist*sp, ez=cam.dist*cp*cyw;     // eye rel target
+        float fx=-ex,fy=-ey,fz=-ez,fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl<1e-6f)fl=1; fx/=fl;fy/=fl;fz/=fl;
+        float rx=-fz,ry=0,rz=fx,rl=sqrtf(rx*rx+rz*rz); if(rl<1e-6f){rx=1;rz=0;rl=1;} rx/=rl;rz/=rl;
+        float ux=ry*fz-rz*fy, uy=rz*fx-rx*fz, uz=rx*fy-ry*fx;
+        Vm[0]=rx; Vm[4]=ry; Vm[8]=rz;  Vm[12]=-(rx*ex+ry*ey+rz*ez);      // column-major view
+        Vm[1]=ux; Vm[5]=uy; Vm[9]=uz;  Vm[13]=-(ux*ex+uy*ey+uz*ez);
+        Vm[2]=-fx;Vm[6]=-fy;Vm[10]=-fz;Vm[14]=(fx*ex+fy*ey+fz*ez);
+        Vm[3]=0; Vm[7]=0; Vm[11]=0; Vm[15]=1;
+    };
+    // body -> flipped-km relative to the look-at center, using the LIVE root orient
+    // (Rl, app row-major) + live root pos. Flip = diag(1,-1,-1) == KX/KY/KZ's sign.
+    auto build_model = [&](const float Rl[9], int32_t ox, int32_t oy, int32_t oz, float Mm[16]) {
+        float tx = ( (float)(ox - view.player_x))/U - cam.cx;
+        float ty = (-(float)(oy - view.player_y))/U - cam.cy;
+        float tz = (-(float)(oz - view.player_z))/U - cam.cz;
+        float s = 1.0f/U; const float F[3]={1.0f,-1.0f,-1.0f};
+        for (int c=0;c<3;++c){ for (int r=0;r<3;++r) Mm[c*4+r]=F[r]*Rl[r*3+c]*s; Mm[c*4+3]=0; }
+        Mm[12]=tx; Mm[13]=ty; Mm[14]=tz; Mm[15]=1;
+    };
+
     // Homeworld-style sensor sphere: a dim, soft dark-blue shell at scanner range,
     // drawn first so the grid + objects sit in front of it.
     if (view.scanner_range > 0) {
@@ -1378,18 +1406,43 @@ static void map3d_panel(void)
             if (PROJ(-G, 0, g, a, d) && PROJ( G, 0, g, b, d)) dl->AddLine(a, b, gc, 1.0f);
         }
     }
-    // objects: project, depth-sort far->near, draw drop line + glow + dot + label
-    struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
+    // objects: project, depth-sort far->near, draw drop line + glow + dot/hull + label
+    struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; HullCache* hull; float rpx; };
     std::vector<PObj> ps; ps.reserve(view.objects.size());
+    x3::Mem emem = make_engine_mem();
     for (const auto& o : view.objects) {
         if (!obj_passes_filter(o, map3d_rel, map3d_type)) continue;
         ImVec2 s; float d;
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
-        PObj e; e.depth = d; e.s = s; e.o = &o; float gd;
+        PObj e; e.depth = d; e.s = s; e.o = &o; e.hull = nullptr; e.rpx = 0; float gd;
         e.gok = PROJ(KX(o.x), 0, KZ(o.z), e.ground, gd);
+        // promote to a hull when big enough on screen and it has a resolvable mesh
+        uint32_t root = 0, mid = 0;
+        if (x3::read_object_root(emem, o.addr, root)) {
+            emem.u32(root + 0x12c, mid);
+            HullCache* hc = hull_ensure(o.addr, mid, hull_budget);
+            if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
+        }
         ps.push_back(e);
     }
     std::sort(ps.begin(), ps.end(), [](const PObj& a, const PObj& b){ return a.depth > b.depth; });
+
+    // GPU hull pass: emit the callback now (renders UNDER the dots/labels added below),
+    // but g_solids is filled in the draw loop and read at render time.
+    float Vm[16], Pm[16];
+    build_view(Vm);
+    meshgl::m_perspective(Pm, 0.9f, avail.x / avail.y, 0.02f, 50000.0f);
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        float fbx=io.DisplayFramebufferScale.x, fby=io.DisplayFramebufferScale.y;
+        int fbh=(int)(io.DisplaySize.y*fby);
+        meshgl::g_svx=(int)(p0.x*fbx); meshgl::g_svw=(int)(avail.x*fbx);
+        meshgl::g_svh=(int)(avail.y*fby); meshgl::g_svy=fbh-(int)(p1.y*fby);
+    }
+    if (meshgl::g_ok) {
+        dl->AddCallback(meshgl::solid_cb, nullptr);
+        dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    }
     for (const auto& e : ps) {
         const auto& o = *e.o; ImU32 col = faction_color(o);
         if (e.gok) {
@@ -1397,13 +1450,33 @@ static void map3d_panel(void)
             dl->AddCircleFilled(e.ground, 1.6f, (col & 0x00FFFFFFu) | 0x66000000u); // ground tick
         }
         float rad = 70.0f / e.depth; rad = rad < 1.5f ? 1.5f : (rad > 9.0f ? 9.0f : rad);
-        dl->AddCircleFilled(e.s, rad*2.4f, (col & 0x00FFFFFFu) | 0x22000000u);
-        dl->AddCircleFilled(e.s, rad, col);
-        if (o.id == g_sel_id) {                              // selection brackets
-            float r = rad + 5.0f;
-            dl->AddCircle(e.s, r, IM_COL32(255, 255, 255, 235), 0, 1.6f);
-            dl->AddLine(ImVec2(e.s.x - r - 2, e.s.y), ImVec2(e.s.x - r + 3, e.s.y), IM_COL32(255,255,255,235), 1.6f);
-            dl->AddLine(ImVec2(e.s.x + r - 3, e.s.y), ImVec2(e.s.x + r + 2, e.s.y), IM_COL32(255,255,255,235), 1.6f);
+        if (e.hull && meshgl::g_ok) {                        // solid holographic hull
+            uint32_t root = 0; float Rl[9] = {1,0,0, 0,1,0, 0,0,1};
+            if (x3::read_object_root(emem, o.addr, root)) x3::read_node_orient(emem, root, 0x3c, Rl);
+            meshgl::SolidItem si; si.h = &e.hull->gpu;
+            float Mm[16], MV[16];
+            build_model(Rl, o.x, o.y, o.z, Mm);
+            meshgl::m_mul(MV, Vm, Mm);
+            meshgl::m_mul(si.mvp, Pm, MV);
+            for (int k=0;k<16;++k) si.mv[k]=MV[k];
+            si.col[0]=((col)&0xff)/255.0f; si.col[1]=((col>>8)&0xff)/255.0f;
+            si.col[2]=((col>>16)&0xff)/255.0f; si.col[3]=0.85f;
+            meshgl::g_solids.push_back(si);
+        } else {                                             // blip dot
+            dl->AddCircleFilled(e.s, rad*2.4f, (col & 0x00FFFFFFu) | 0x22000000u);
+            dl->AddCircleFilled(e.s, rad, col);
+        }
+        if (o.id == g_sel_id) {                              // four-corner selection box
+            float r = (e.hull ? std::max(e.rpx, 10.0f) : 9.0f) + 4.0f;
+            ImU32 bc = IM_COL32(255,255,255,235); float L = r*0.5f; ImVec2 c = e.s;
+            dl->AddLine(ImVec2(c.x-r,c.y-r), ImVec2(c.x-r+L,c.y-r), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x-r,c.y-r), ImVec2(c.x-r,c.y-r+L), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x+r,c.y-r), ImVec2(c.x+r-L,c.y-r), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x+r,c.y-r), ImVec2(c.x+r,c.y-r+L), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x-r,c.y+r), ImVec2(c.x-r+L,c.y+r), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x-r,c.y+r), ImVec2(c.x-r,c.y+r-L), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r-L,c.y+r), bc, 1.6f);
+            dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r,c.y+r-L), bc, 1.6f);
         }
         bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
                     o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
