@@ -920,6 +920,10 @@ static void map_panel(void)
                                   ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
                 select_target(o);                                    // left-click sets target
             ImGui::PopStyleColor();
+            if (view.current_target_addr && o.addr == view.current_target_addr) {  // live game target
+                ImVec2 ra = ImGui::GetItemRectMin(), rb = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRect(ra, rb, IM_COL32(255,170,40,220), 0.0f, 0, 1.5f);
+            }
             if (ImGui::BeginPopupContextItem("row")) {       // right-click the row
                 const char* rel = relation_label(o.relation);
                 ImGui::TextDisabled("%s  (%s%s%s)", o.name.empty() ? "(unnamed)" : o.name.c_str(),
@@ -1578,6 +1582,12 @@ static void map3d_panel(void)
                 axis(1, IM_COL32(255,230, 90,235));          // up      = yellow (roll)
                 axis(2, IM_COL32( 90,200,255,235));          // forward = cyan
             }
+        }
+        if (view.current_target_addr && o.addr == view.current_target_addr) {  // live game target reticle
+            float tr = (e.hull ? std::max(e.rpx, 10.0f) : 9.0f) + 7.0f;
+            ImU32 tc = IM_COL32(255,170,40,230);
+            dl->AddCircle(e.s, tr, tc, 28, 1.8f);
+            dl->AddCircle(e.s, tr * 0.6f, tc, 24, 1.2f);
         }
         bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
                     o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
