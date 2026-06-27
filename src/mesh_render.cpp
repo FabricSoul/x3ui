@@ -130,7 +130,8 @@ static void restore_gl(const GLState& s) {
 }
 
 // ------------------------------------------------------------- engine bindings
-static const uint32_t G_WORLD_ROOT = 0x082a0640;
+// 0x082a0640 is a POINTER to the world-root struct (not the struct itself).
+static const uint32_t G_WORLD_ROOT_PTR = 0x082a0640;
 typedef int  (*pfn_setcam)(void* view, void* scene);
 typedef void (*pfn_render_object)(void* obj, void* view, void* scratch, void* scene);
 typedef void (*pfn_euler)(int* out3x3, uint16_t yaw, uint16_t pitch, uint16_t roll);
@@ -145,11 +146,14 @@ bool mesh_render_object(uint32_t obj, const MeshView& mv) {
     load_gl();
     if (!g.ok || !obj) return false;
 
-    uint32_t scene = rd32(G_WORLD_ROOT + 0x64);
+    uint32_t world = rd32(G_WORLD_ROOT_PTR);   // deref: g_world_root is a pointer
+    if (!world) return false;
+    uint32_t scene = rd32(world + 0x64);
     if (!scene) return false;
+    if (!(rd32(scene + 0x244) & 1)) return false;   // scene must be renderable (in flight)
     uint32_t view = rd32(scene + 0x1c);
     if (!view) return false;
-    uint32_t vp = rd32(scene + 0x24c);
+    uint32_t vp = rd32(scene + 0x24c);              // null in menus/map -> setCamera would crash
     if (!vp) return false;
 
     // Orbit target = object's world position (the values the renderer reads).
@@ -191,7 +195,7 @@ bool mesh_render_object(uint32_t obj, const MeshView& mv) {
         g.Clear(GL_DEPTH_BUFFER_BIT);
     }
     RenderObject((void*)(uintptr_t)obj, (void*)(uintptr_t)view,
-                 (void*)(uintptr_t)(G_WORLD_ROOT + 0x4c), (void*)(uintptr_t)scene);
+                 (void*)(uintptr_t)(world + 0x4c), (void*)(uintptr_t)scene);
     restore_gl(s);
 
     // --- restore scene fields (so the engine's next real frame is unaffected) ---

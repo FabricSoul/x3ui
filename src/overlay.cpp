@@ -977,7 +977,10 @@ static void map3d_panel(void)
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     ImGui::Checkbox("follow ship", &follow);
     ImGui::SameLine();
-    if (ImGui::Button("reset view")) { cam.tx = cam.ty = cam.tz = 0; }  // ease back to the ship
+    if (ImGui::Button("reset view")) {           // re-center + re-orient (e.g. after undocking)
+        cam.tx = cam.ty = cam.tz = 0;
+        cam.yaw = 0.7f; cam.pitch = 0.5f; cam.dist = 70.0f;
+    }
     ImGui::SameLine(); ImGui::TextDisabled("dbl-click focus · MMB pan");
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
