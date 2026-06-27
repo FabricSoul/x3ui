@@ -34,6 +34,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 #include <SDL2/SDL.h>
 
@@ -689,13 +690,17 @@ static x3::Mem make_engine_mem(void)
     // __cdecl(int,int)->char*, read-only; safe here because read_current_sector and
     // the debug pump both run on the main thread between frames.
     m.text = [](uint32_t page, uint32_t id) -> std::string {
+        static std::unordered_map<uint64_t, std::string> cache;   // names are constant
+        uint64_t key = ((uint64_t)page << 32) | id;
+        auto it = cache.find(key);
+        if (it != cache.end()) return it->second;
         typedef const char* (*get_text_t)(int, int);
         static get_text_t get_text = (get_text_t)0x080acd30;
         const char* s = get_text((int)page, (int)id);
-        if (!s) return "";
         std::string out;
-        for (int i = 0; i < 128 && s[i]; ++i) out.push_back(s[i]);
-        if (out == "=TextIDNotFound=") return "";   // engine's not-found sentinel
+        for (int i = 0; s && i < 128 && s[i]; ++i) out.push_back(s[i]);
+        if (out == "=TextIDNotFound=") out.clear();   // engine's not-found sentinel
+        cache.emplace(key, out);
         return out;
     };
     return m;
@@ -946,14 +951,10 @@ static void map3d_panel(void)
     if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
     mem_open();
 
+    // Refresh every frame so object motion is smooth at the game's frame rate
+    // (name lookups are cached, so the per-frame read stays cheap).
     static x3::SectorView view;
-    static double last = -1.0;
-    static bool   frozen = false;
-    double now = ImGui::GetTime();
-    if (!frozen && (last < 0.0 || (now - last) > 0.15)) {
-        view = x3::read_current_sector(make_engine_mem());
-        last = now;
-    }
+    view = x3::read_current_sector(make_engine_mem());
     if (!view.in_sector || !view.player_valid) {
         ImGui::TextDisabled("not in a sector");
         ImGui::End();
@@ -1057,7 +1058,8 @@ static void map3d_panel(void)
             for (int i = 0; i <= 48; ++i) {
                 float t = i / 48.0f * 6.2831853f, ca = cosf(t), sa = sinf(t); ImVec2 s;
                 if (PROJ(r*(ax*ca+bx*sa), r*(ay*ca+by*sa), r*(az*ca+bz*sa), s, d)) {
-                    if (has) dl->AddLine(prev, s, wc, 1.0f); prev = s; has = true;
+                    if (has) dl->AddLine(prev, s, wc, 1.0f);
+                    prev = s; has = true;
                 } else has = false;
             }
         };
@@ -1066,9 +1068,9 @@ static void map3d_panel(void)
         great(0,0,1, 0,1,0);   // vertical
     }
 
-    // ecliptic grid on y=0
+    // ecliptic grid on y=0 (wide, coarse cells for context)
     {
-        const float G = 40.0f, step = 10.0f; ImU32 gc = IM_COL32(40, 70, 110, 90);
+        const float G = 200.0f, step = 40.0f; ImU32 gc = IM_COL32(40, 70, 110, 90);
         for (float g = -G; g <= G + 0.1f; g += step) {
             ImVec2 a, b; float d;
             if (PROJ(g, 0, -G, a, d) && PROJ(g, 0,  G, b, d)) dl->AddLine(a, b, gc, 1.0f);
@@ -1171,8 +1173,6 @@ static void map3d_panel(void)
         dl->AddText(ImVec2(p0.x + 6, p0.y + 4), IM_COL32(180, 200, 220, 210),
                     view.sector_name.c_str());
 
-    frozen = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
-                                    ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     ImGui::End();
 }
 
