@@ -688,6 +688,34 @@ static x3::Mem make_engine_mem(void)
     return m;
 }
 
+// Shared object filter for the table + 3D map (EVE-overview style).
+enum MapFilter { MF_ALL = 0, MF_SHIPS, MF_STATIONS, MF_GATES, MF_ASTEROIDS, MF_OTHER };
+static int g_map_filter = MF_ALL;
+
+static bool obj_passes_filter(int16_t t, int f)
+{
+    switch (f) {
+        case MF_SHIPS:     return t == x3::off::TYPE_SHIP;
+        case MF_STATIONS:  return t == x3::off::TYPE_STATION || t == x3::off::TYPE_FACTORY;
+        case MF_GATES:     return t == x3::off::TYPE_GATE;
+        case MF_ASTEROIDS: return t == x3::off::TYPE_ASTEROID;
+        case MF_OTHER:     return !(t == x3::off::TYPE_SHIP || t == x3::off::TYPE_STATION ||
+                                    t == x3::off::TYPE_FACTORY || t == x3::off::TYPE_GATE ||
+                                    t == x3::off::TYPE_ASTEROID);
+        default:           return true;   // MF_ALL
+    }
+}
+
+static void map_filter_bar(void)
+{
+    ImGui::RadioButton("all", &g_map_filter, MF_ALL);            ImGui::SameLine();
+    ImGui::RadioButton("ships", &g_map_filter, MF_SHIPS);       ImGui::SameLine();
+    ImGui::RadioButton("stations", &g_map_filter, MF_STATIONS); ImGui::SameLine();
+    ImGui::RadioButton("gates", &g_map_filter, MF_GATES);       ImGui::SameLine();
+    ImGui::RadioButton("roids", &g_map_filter, MF_ASTEROIDS);   ImGui::SameLine();
+    ImGui::RadioButton("other", &g_map_filter, MF_OTHER);
+}
+
 // Read-only panel: list the objects in the player's current sector.
 static void map_panel(void)
 {
@@ -723,14 +751,10 @@ static void map_panel(void)
                 view.objects.size(), n_ships, n_stations,
                 view.scanner_range / x3::off::UNITS_PER_KM);
 
-    // Filter categories: 0 = all, 1 = ships (type 7), 2 = stations (type 5/6).
-    static int filter = 0;
-    ImGui::RadioButton("all", &filter, 0);       ImGui::SameLine();
-    ImGui::RadioButton("ships", &filter, 1);     ImGui::SameLine();
-    ImGui::RadioButton("stations", &filter, 2);
-    int shown = (filter == 1) ? n_ships
-              : (filter == 2) ? n_stations
-                              : (int)view.objects.size();
+    // EVE-overview filter (shared with the 3D map).
+    map_filter_bar();
+    int shown = 0;
+    for (const auto& o : view.objects) if (obj_passes_filter(o.type, g_map_filter)) ++shown;
     ImGui::SameLine(); ImGui::TextDisabled("|  showing %d", shown);
 
     // Sortable, with a sticky header and a right-click-header column show/hide menu
@@ -752,13 +776,8 @@ static void map_panel(void)
 
         static std::vector<const x3::ObjInfo*> rows;
         rows.clear();
-        for (const auto& o : view.objects) {
-            bool is_ship = (o.type == x3::off::TYPE_SHIP);
-            bool is_stn  = (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY);
-            if (filter == 1 && !is_ship) continue;
-            if (filter == 2 && !is_stn)  continue;
-            rows.push_back(&o);
-        }
+        for (const auto& o : view.objects)
+            if (obj_passes_filter(o.type, g_map_filter)) rows.push_back(&o);
         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
             if (ss->SpecsCount > 0) {
                 const ImGuiTableColumnSortSpecs& sp = ss->Specs[0];
@@ -880,6 +899,8 @@ static void map3d_panel(void)
 
     static Camera3D cam;
 
+    map_filter_bar();   // shared EVE-overview filter (same selection as the table)
+
     ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 64.0f || avail.y < 64.0f) { ImGui::End(); return; }
     ImVec2 p0  = ImGui::GetCursorScreenPos();
@@ -938,6 +959,7 @@ static void map3d_panel(void)
     struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
     std::vector<PObj> ps; ps.reserve(view.objects.size());
     for (const auto& o : view.objects) {
+        if (!obj_passes_filter(o.type, g_map_filter)) continue;
         ImVec2 s; float d;
         if (!project3d(cam, ctr, focal, KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; float gd;
