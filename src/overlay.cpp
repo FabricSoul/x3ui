@@ -843,6 +843,19 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
     real_SwapWindow(window);
 }
 
+// Feed one SDL event to ImGui. The mouse wheel is special-cased: sdl2-compat
+// (over SDL3) leaves wheel.preciseX/preciseY uninitialized, and ImGui's SDL2
+// backend reads those floats -> astronomically large scroll values (table snaps
+// to top). Use the integer wheel deltas, which sdl2-compat sets correctly.
+static void feed_imgui_event(const SDL_Event &e)
+{
+    if (e.type == SDL_MOUSEWHEEL) {
+        ImGui::GetIO().AddMouseWheelEvent(-(float)e.wheel.x, (float)e.wheel.y);
+        return;
+    }
+    ImGui_ImplSDL2_ProcessEvent(&e);
+}
+
 // ---- interposed: event-queue pump ----------------------------------------
 // X3 reads input by PEEK-ing the queue (SDL_PeepEvents action=PEEK) and acting
 // on it, only GET-ing afterwards to clear it — so filtering GET events is too
@@ -869,12 +882,12 @@ X3UI_EXPORT void SDL_PumpEvents(void)
         for (int guard = 0; guard < 64; ++guard) {     // drain: game gets none
             int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
             if (n <= 0) break;
-            for (int i = 0; i < n; ++i) ImGui_ImplSDL2_ProcessEvent(&buf[i]);
+            for (int i = 0; i < n; ++i) feed_imgui_event(buf[i]);
             if (n < 64) break;
         }
     } else {                                            // peek: ImGui tracks, game keeps
         int n = real_PeepEvents(buf, 64, SDL_PEEKEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
-        for (int i = 0; i < n && i < 64; ++i) ImGui_ImplSDL2_ProcessEvent(&buf[i]);
+        for (int i = 0; i < n && i < 64; ++i) feed_imgui_event(buf[i]);
     }
 
     // Keyboard incl. text (0x300..0x303). Drained only while capturing text; the
@@ -890,7 +903,7 @@ X3UI_EXPORT void SDL_PumpEvents(void)
                     fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
                     continue;
                 }
-                ImGui_ImplSDL2_ProcessEvent(&e);
+                feed_imgui_event(e);
             }
             if (n < 64) break;
         }
