@@ -160,10 +160,15 @@ static void test_visibility_filter() {
     fm.w(0x5000 + 0x40, 0x10);
     fm.w(0x5000 + 0x0c, 0x9200);  fm.s(0x9200, "Hidden A");
     // node3: hidden via +0x44 bit29 (0x20000000)
-    fm.w(0x6000 + 0x00, 0x3004);     // -> sentinel
+    fm.w(0x6000 + 0x00, 0x7000);     // -> node4
     fm.w(0x6000 + 0x48, 20);
     fm.w(0x6000 + 0x44, 0x20000000);
     fm.w(0x6000 + 0x0c, 0x9300);  fm.s(0x9300, "Hidden B");
+    // node4: hidden via +0x44 bit27 (0x08000000) — the UNDEFINED type-20 case
+    fm.w(0x7000 + 0x00, 0x3004);     // -> sentinel
+    fm.w(0x7000 + 0x48, 20);
+    fm.w(0x7000 + 0x44, 0x08000000);
+    fm.w(0x7000 + 0x0c, 0x9400);  fm.s(0x9400, "Hidden C");
 
     auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
     CHECK_EQ(v.objects.size(), (size_t)1);

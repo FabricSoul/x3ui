@@ -35,12 +35,14 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
         // Visibility gate — replicate the game's gravidar / sector-map filter so
         // we show the player-visible subset, not the engine's omniscient list:
         //   hide if (+0x40 & 0x11)        internal sub-part / non-contact flag
-        //   hide if (+0x44 & 0x20000000)  camera / debris / wreck / *** UNDEFINED ***
+        //   hide if (+0x44 & 0x28000000)  bit29: camera/debris/wreck/nav-special;
+        //                                 bit27: internal/despawn (the *** UNDEFINED ***
+        //                                 type-20 objects the in-game map also drops)
         // (read failures leave the flag 0 -> treated as visible, e.g. in tests).
         uint32_t f40 = 0, f44 = 0;
         ru32(mem, node + off::OBJ_FLAGS,  f40);
         ru32(mem, node + off::OBJ_FLAGS2, f44);
-        bool hidden = (f40 & 0x11u) || (f44 & 0x20000000u);
+        bool hidden = (f40 & 0x11u) || (f44 & 0x28000000u);
 
         if (!hidden) {
             ObjInfo o;
