@@ -124,12 +124,28 @@ static void overlay_init(SDL_Window *window)
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.MouseDrawCursor = false;
     ImGui::StyleColorsDark();
-    {   // more opaque panels so the overlay reads cleanly (e.g. screen-recorded demos)
+    {   // Holographic HUD theme: translucent blue/cyan tinted glass with glowing edges —
+        // this is a game-mod overlay, not a dev tool, so panels stay see-through.
         ImGuiStyle& st = ImGui::GetStyle();
-        st.Colors[ImGuiCol_WindowBg].w = 0.97f;   // general windows (was ~0.94)
-        st.Colors[ImGuiCol_ChildBg].w  = 0.97f;   // embedded child regions
-        st.Colors[ImGuiCol_TitleBg].w        = 1.0f;
-        st.Colors[ImGuiCol_TitleBgActive].w  = 1.0f;
+        st.WindowRounding = 4.0f; st.FrameRounding = 3.0f;
+        st.WindowBorderSize = 1.0f; st.FrameBorderSize = 1.0f;
+        auto C = [&](ImGuiCol c, float r, float g, float b, float a){ st.Colors[c] = ImVec4(r,g,b,a); };
+        C(ImGuiCol_WindowBg,       0.03f,0.07f,0.10f, 0.40f);
+        C(ImGuiCol_ChildBg,        0.04f,0.09f,0.13f, 0.28f);
+        C(ImGuiCol_TitleBg,        0.04f,0.12f,0.16f, 0.50f);
+        C(ImGuiCol_TitleBgActive,  0.06f,0.22f,0.30f, 0.66f);
+        C(ImGuiCol_Border,         0.35f,0.80f,0.95f, 0.45f);
+        C(ImGuiCol_FrameBg,        0.10f,0.30f,0.40f, 0.28f);
+        C(ImGuiCol_FrameBgHovered, 0.15f,0.45f,0.60f, 0.45f);
+        C(ImGuiCol_FrameBgActive,  0.20f,0.55f,0.70f, 0.55f);
+        C(ImGuiCol_Header,         0.15f,0.45f,0.60f, 0.35f);
+        C(ImGuiCol_HeaderHovered,  0.20f,0.55f,0.70f, 0.50f);
+        C(ImGuiCol_Button,         0.12f,0.38f,0.50f, 0.38f);
+        C(ImGuiCol_ButtonHovered,  0.18f,0.52f,0.68f, 0.55f);
+        C(ImGuiCol_ButtonActive,   0.25f,0.65f,0.82f, 0.70f);
+        C(ImGuiCol_SliderGrab,     0.40f,0.85f,1.00f, 0.80f);
+        C(ImGuiCol_Text,           0.82f,0.95f,1.00f, 1.00f);   // content stays bright/legible
+        C(ImGuiCol_Separator,      0.35f,0.80f,0.95f, 0.30f);
     }
 
     SDL_GLContext ctx = SDL_GL_GetCurrentContext();
@@ -1262,7 +1278,7 @@ static void hull_gc(const std::vector<x3::ObjInfo>& live) {
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(1.0f);                 // fully solid viewer for clean demos
+    ImGui::SetNextWindowBgAlpha(0.32f);               // translucent holo viewer
     if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
     mem_open();
 
@@ -1373,7 +1389,7 @@ static void map3d_panel(void)
     }
 
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(7, 9, 16, 255));
+    dl->AddRectFilled(p0, p1, IM_COL32(6, 16, 24, 96));   // translucent: space shows through (holo)
 
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
@@ -1604,7 +1620,7 @@ static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
 static void mesh_preview_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(380, 400), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(1.0f);                 // fully solid viewer for clean demos
+    ImGui::SetNextWindowBgAlpha(0.32f);               // translucent holo viewer
     if (!ImGui::Begin("x3ui - mesh preview")) { ImGui::End(); return; }
 
     // Re-read geometry only when the selection changes (it's static per object).
@@ -1670,7 +1686,7 @@ static void mesh_preview_panel(void)
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(8, 10, 18, 255));
+    dl->AddRectFilled(p0, p1, IM_COL32(6, 16, 24, 96));   // translucent holo backdrop
 
     if (meshgl::g_ok) {
         // GPU path: projection happens on the GPU via an MVP uniform; one draw call.
@@ -1728,7 +1744,7 @@ static void overlay_draw(void)
     // draw nothing so the game's own cursor shows through.
     ImGui::GetIO().MouseDrawCursor = ImGui::GetIO().WantCaptureMouse;
 
-    ImGui::SetNextWindowBgAlpha(0.96f);
+    ImGui::SetNextWindowBgAlpha(0.40f);
     if (ImGui::Begin("x3ui")) {
         ImGui::Text("x3ui overlay  —  %.1f FPS", ImGui::GetIO().Framerate);
         ImGui::Separator();
