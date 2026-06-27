@@ -965,6 +965,220 @@ static const char* relation_label(int8_t rel)
     }
 }
 
+// ───────────────────────── GPU wireframe line renderer ─────────────────────
+// A dense preview (100k+ verts / 280k+ edges) made the per-frame ImGui CPU line
+// build the bottleneck. Instead we upload the NORMALIZED line geometry to a GL
+// buffer ONCE per selection and draw it in one glDrawElements via an ImGui draw
+// callback, with the orbit camera as an MVP uniform — per-frame CPU cost drops to
+// a 4x4 matrix + one draw call. GL 2.0+ entrypoints load via SDL_GL_GetProcAddress
+// (the game's context is GL 3.0+/GLSL 130); GL 1.1 calls are linked directly.
+namespace meshgl {
+static bool    g_tried = false, g_ok = false;
+static GLuint  g_vao = 0, g_vbo = 0, g_ebo = 0, g_prog = 0;
+static GLint   g_uMVP = -1, g_uColor = -1;
+static GLsizei g_edge_count = 0;
+// Holographic solid program (pos+normal, fresnel rim, additive) — shared by all hulls.
+static GLuint  g_sprog = 0;
+static GLint   g_suMVP = -1, g_suMV = -1, g_suColor = -1;
+
+static PFNGLGENBUFFERSPROC              pGenBuffers;
+static PFNGLBINDBUFFERPROC              pBindBuffer;
+static PFNGLBUFFERDATAPROC              pBufferData;
+static PFNGLGENVERTEXARRAYSPROC         pGenVertexArrays;
+static PFNGLBINDVERTEXARRAYPROC         pBindVertexArray;
+static PFNGLENABLEVERTEXATTRIBARRAYPROC pEnableVertexAttribArray;
+static PFNGLVERTEXATTRIBPOINTERPROC     pVertexAttribPointer;
+static PFNGLCREATESHADERPROC            pCreateShader;
+static PFNGLSHADERSOURCEPROC            pShaderSource;
+static PFNGLCOMPILESHADERPROC           pCompileShader;
+static PFNGLCREATEPROGRAMPROC           pCreateProgram;
+static PFNGLATTACHSHADERPROC            pAttachShader;
+static PFNGLBINDATTRIBLOCATIONPROC      pBindAttribLocation;
+static PFNGLLINKPROGRAMPROC             pLinkProgram;
+static PFNGLUSEPROGRAMPROC              pUseProgram;
+static PFNGLGETUNIFORMLOCATIONPROC      pGetUniformLocation;
+static PFNGLUNIFORMMATRIX4FVPROC        pUniformMatrix4fv;
+static PFNGLUNIFORM4FPROC               pUniform4f;
+static PFNGLDELETESHADERPROC            pDeleteShader;
+static PFNGLDELETEBUFFERSPROC           pDeleteBuffers;
+static PFNGLDELETEVERTEXARRAYSPROC      pDeleteVertexArrays;
+
+template<class T> static bool load(T& fp, const char* nm) {
+    fp = (T)SDL_GL_GetProcAddress(nm); return fp != nullptr;
+}
+static void init() {
+    g_tried = true;
+    bool ok = load(pGenBuffers,"glGenBuffers") && load(pBindBuffer,"glBindBuffer")
+        && load(pBufferData,"glBufferData") && load(pGenVertexArrays,"glGenVertexArrays")
+        && load(pBindVertexArray,"glBindVertexArray") && load(pEnableVertexAttribArray,"glEnableVertexAttribArray")
+        && load(pVertexAttribPointer,"glVertexAttribPointer") && load(pCreateShader,"glCreateShader")
+        && load(pShaderSource,"glShaderSource") && load(pCompileShader,"glCompileShader")
+        && load(pCreateProgram,"glCreateProgram") && load(pAttachShader,"glAttachShader")
+        && load(pBindAttribLocation,"glBindAttribLocation") && load(pLinkProgram,"glLinkProgram")
+        && load(pUseProgram,"glUseProgram") && load(pGetUniformLocation,"glGetUniformLocation")
+        && load(pUniformMatrix4fv,"glUniformMatrix4fv") && load(pUniform4f,"glUniform4f")
+        && load(pDeleteShader,"glDeleteShader")
+        && load(pDeleteBuffers,"glDeleteBuffers") && load(pDeleteVertexArrays,"glDeleteVertexArrays");
+    if (!ok) return;
+    const char* vs = "#version 130\nin vec3 aPos;\nuniform mat4 uMVP;\n"
+                     "void main(){ gl_Position = uMVP*vec4(aPos,1.0); }\n";
+    const char* fs = "#version 130\nuniform vec4 uColor;\nout vec4 frag;\n"
+                     "void main(){ frag = uColor; }\n";
+    GLuint v = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(v,1,&vs,nullptr); pCompileShader(v);
+    GLuint f = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(f,1,&fs,nullptr); pCompileShader(f);
+    g_prog = pCreateProgram(); pAttachShader(g_prog,v); pAttachShader(g_prog,f);
+    pBindAttribLocation(g_prog,0,"aPos"); pLinkProgram(g_prog);
+    pDeleteShader(v); pDeleteShader(f);
+    g_uMVP = pGetUniformLocation(g_prog,"uMVP"); g_uColor = pGetUniformLocation(g_prog,"uColor");
+    pGenVertexArrays(1,&g_vao); pGenBuffers(1,&g_vbo); pGenBuffers(1,&g_ebo);
+    pBindVertexArray(g_vao);
+    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
+    pEnableVertexAttribArray(0);
+    pVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,(const void*)0);
+    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
+    pBindVertexArray(0);
+
+    // Holographic solid program: pos+normal, fresnel rim, additive. uMV gives view-space
+    // pos+normal (camera at origin in view space) for the fresnel term.
+    const char* svs =
+        "#version 130\n"
+        "in vec3 aPos; in vec3 aNormal;\n"
+        "uniform mat4 uMVP; uniform mat4 uMV;\n"
+        "out vec3 vN; out vec3 vP;\n"
+        "void main(){ vP=(uMV*vec4(aPos,1.0)).xyz; vN=normalize(mat3(uMV)*aNormal);\n"
+        "             gl_Position=uMVP*vec4(aPos,1.0); }\n";
+    const char* sfs =
+        "#version 130\n"
+        "in vec3 vN; in vec3 vP; uniform vec4 uColor; out vec4 frag;\n"
+        "void main(){ vec3 N=normalize(vN); vec3 V=normalize(-vP);\n"
+        "  float f=pow(1.0-clamp(abs(dot(N,V)),0.0,1.0),2.5);\n"   // abs: rim glow on near AND far faces
+        "  float i=0.18+0.9*f;\n"                                   // base fill + rim gain
+        "  frag=vec4(uColor.rgb*i, uColor.a*i); }\n";
+    GLuint sv = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(sv,1,&svs,nullptr); pCompileShader(sv);
+    GLuint sf = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(sf,1,&sfs,nullptr); pCompileShader(sf);
+    g_sprog = pCreateProgram(); pAttachShader(g_sprog,sv); pAttachShader(g_sprog,sf);
+    pBindAttribLocation(g_sprog,0,"aPos"); pBindAttribLocation(g_sprog,1,"aNormal");
+    pLinkProgram(g_sprog); pDeleteShader(sv); pDeleteShader(sf);
+    g_suMVP = pGetUniformLocation(g_sprog,"uMVP");
+    g_suMV  = pGetUniformLocation(g_sprog,"uMV");
+    g_suColor = pGetUniformLocation(g_sprog,"uColor");
+
+    g_ok = true;
+}
+static void upload(const std::vector<float>& verts, const std::vector<uint32_t>& edges) {
+    if (!g_ok) return;
+    pBindVertexArray(g_vao);
+    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
+    pBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size()*sizeof(float)), verts.data(), GL_STATIC_DRAW);
+    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
+    pBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(edges.size()*sizeof(uint32_t)), edges.data(), GL_STATIC_DRAW);
+    pBindVertexArray(0);
+    g_edge_count = (GLsizei)edges.size();
+}
+
+// One cached object's GPU geometry (body-local verts+normals, triangle indices).
+struct Hull { GLuint vao=0, vbo=0, ebo=0; GLsizei icount=0; };
+
+static Hull hull_create(const std::vector<float>& verts, const std::vector<float>& normals,
+                        const std::vector<uint32_t>& tris) {
+    Hull h;
+    if (!g_ok || verts.empty() || tris.empty()) return h;
+    size_t vc = verts.size() / 3;
+    std::vector<float> inter(vc * 6);
+    for (size_t i = 0; i < vc; ++i) {
+        inter[i*6+0]=verts[i*3+0]; inter[i*6+1]=verts[i*3+1]; inter[i*6+2]=verts[i*3+2];
+        inter[i*6+3]=normals[i*3+0]; inter[i*6+4]=normals[i*3+1]; inter[i*6+5]=normals[i*3+2];
+    }
+    pGenVertexArrays(1,&h.vao); pGenBuffers(1,&h.vbo); pGenBuffers(1,&h.ebo);
+    pBindVertexArray(h.vao);
+    pBindBuffer(GL_ARRAY_BUFFER,h.vbo);
+    pBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(inter.size()*sizeof(float)),inter.data(),GL_STATIC_DRAW);
+    pEnableVertexAttribArray(0);
+    pVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(const void*)0);
+    pEnableVertexAttribArray(1);
+    pVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(const void*)(3*sizeof(float)));
+    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,h.ebo);
+    pBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)(tris.size()*sizeof(uint32_t)),tris.data(),GL_STATIC_DRAW);
+    pBindVertexArray(0);
+    h.icount = (GLsizei)tris.size();
+    return h;
+}
+static void hull_destroy(Hull& h) {
+    if (h.vbo) pDeleteBuffers(1,&h.vbo);
+    if (h.ebo) pDeleteBuffers(1,&h.ebo);
+    if (h.vao) pDeleteVertexArrays(1,&h.vao);
+    h = Hull{};
+}
+
+struct DrawParams { float mvp[16]; float col[4]; int vx, vy, vw, vh; };
+static DrawParams g_dp;
+// Runs inside ImGui's render pass (one GL draw call). ImDrawCallback_ResetRenderState
+// (queued right after) restores ImGui's own GL state.
+static void draw_cb(const ImDrawList*, const ImDrawCmd*) {
+    if (!g_ok || g_edge_count == 0) return;
+    GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
+    glViewport(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
+    glEnable(GL_SCISSOR_TEST); glScissor(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    pUseProgram(g_prog);
+    pUniformMatrix4fv(g_uMVP, 1, GL_FALSE, g_dp.mvp);
+    pUniform4f(g_uColor, g_dp.col[0], g_dp.col[1], g_dp.col[2], g_dp.col[3]);
+    pBindVertexArray(g_vao);
+    glDrawElements(GL_LINES, g_edge_count, GL_UNSIGNED_INT, (const void*)0);
+    pBindVertexArray(0);
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
+}
+
+// Batched holographic solid pass: a per-frame list of (hull, MVP, MV, color), drawn
+// far->near in one callback with additive blend + depth-write off.
+struct SolidItem { const Hull* h; float mvp[16]; float mv[16]; float col[4]; };
+static std::vector<SolidItem> g_solids;
+static int g_svx, g_svy, g_svw, g_svh;       // viewport (framebuffer px), set per panel
+static void solid_cb(const ImDrawList*, const ImDrawCmd*) {
+    if (!g_ok || g_solids.empty()) return;
+    GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
+    glViewport(g_svx,g_svy,g_svw,g_svh);
+    glEnable(GL_SCISSOR_TEST); glScissor(g_svx,g_svy,g_svw,g_svh);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive
+    glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDisable(GL_CULL_FACE);
+    pUseProgram(g_sprog);
+    for (const auto& s : g_solids) {
+        if (!s.h || !s.h->icount) continue;
+        pUniformMatrix4fv(g_suMVP,1,GL_FALSE,s.mvp);
+        pUniformMatrix4fv(g_suMV,1,GL_FALSE,s.mv);
+        pUniform4f(g_suColor,s.col[0],s.col[1],s.col[2],s.col[3]);
+        pBindVertexArray(s.h->vao);
+        glDrawElements(GL_TRIANGLES,s.h->icount,GL_UNSIGNED_INT,(const void*)0);
+    }
+    pBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
+}
+// column-major 4x4 helpers
+static void m_perspective(float* m, float fovy, float aspect, float zn, float zf) {
+    float f = 1.0f / tanf(fovy*0.5f);
+    for (int i = 0; i < 16; ++i) m[i] = 0.0f;
+    m[0]=f/aspect; m[5]=f; m[10]=(zf+zn)/(zn-zf); m[11]=-1.0f; m[14]=(2.0f*zf*zn)/(zn-zf);
+}
+static void m_lookat(float* m, float ex,float ey,float ez) {   // look at origin, up +Y
+    float fx=-ex, fy=-ey, fz=-ez; float fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl<1e-6f)fl=1; fx/=fl;fy/=fl;fz/=fl;
+    float sx=-fz, sy=0.0f, sz=fx;                                      // right = cross(forward,+Y)
+    float sl=sqrtf(sx*sx+sy*sy+sz*sz); if(sl<1e-6f){sx=1;sy=0;sz=0;sl=1;} sx/=sl;sy/=sl;sz/=sl;
+    float ux=sy*fz-sz*fy, uy=sz*fx-sx*fz, uz=sx*fy-sy*fx;              // up = cross(right,forward)
+    m[0]=sx; m[4]=sy; m[8]=sz;  m[12]=-(sx*ex+sy*ey+sz*ez);
+    m[1]=ux; m[5]=uy; m[9]=uz;  m[13]=-(ux*ex+uy*ey+uz*ez);
+    m[2]=-fx;m[6]=-fy;m[10]=-fz;m[14]=(fx*ex+fy*ey+fz*ez);
+    m[3]=0;  m[7]=0;  m[11]=0;  m[15]=1;
+}
+static void m_mul(float* o, const float* a, const float* b) {  // o = a*b
+    for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r)
+        o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
+}
+} // namespace meshgl
+
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
@@ -1209,126 +1423,6 @@ static void map3d_panel(void)
 // and drawn with our own projection (no engine render calls, no GL state). ------
 static float g_mesh_yaw = 0.7f, g_mesh_pitch = 0.3f, g_mesh_dist = 3.2f;
 static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
-
-// ───────────────────────── GPU wireframe line renderer ─────────────────────
-// A dense preview (100k+ verts / 280k+ edges) made the per-frame ImGui CPU line
-// build the bottleneck. Instead we upload the NORMALIZED line geometry to a GL
-// buffer ONCE per selection and draw it in one glDrawElements via an ImGui draw
-// callback, with the orbit camera as an MVP uniform — per-frame CPU cost drops to
-// a 4x4 matrix + one draw call. GL 2.0+ entrypoints load via SDL_GL_GetProcAddress
-// (the game's context is GL 3.0+/GLSL 130); GL 1.1 calls are linked directly.
-namespace meshgl {
-static bool    g_tried = false, g_ok = false;
-static GLuint  g_vao = 0, g_vbo = 0, g_ebo = 0, g_prog = 0;
-static GLint   g_uMVP = -1, g_uColor = -1;
-static GLsizei g_edge_count = 0;
-
-static PFNGLGENBUFFERSPROC              pGenBuffers;
-static PFNGLBINDBUFFERPROC              pBindBuffer;
-static PFNGLBUFFERDATAPROC              pBufferData;
-static PFNGLGENVERTEXARRAYSPROC         pGenVertexArrays;
-static PFNGLBINDVERTEXARRAYPROC         pBindVertexArray;
-static PFNGLENABLEVERTEXATTRIBARRAYPROC pEnableVertexAttribArray;
-static PFNGLVERTEXATTRIBPOINTERPROC     pVertexAttribPointer;
-static PFNGLCREATESHADERPROC            pCreateShader;
-static PFNGLSHADERSOURCEPROC            pShaderSource;
-static PFNGLCOMPILESHADERPROC           pCompileShader;
-static PFNGLCREATEPROGRAMPROC           pCreateProgram;
-static PFNGLATTACHSHADERPROC            pAttachShader;
-static PFNGLBINDATTRIBLOCATIONPROC      pBindAttribLocation;
-static PFNGLLINKPROGRAMPROC             pLinkProgram;
-static PFNGLUSEPROGRAMPROC              pUseProgram;
-static PFNGLGETUNIFORMLOCATIONPROC      pGetUniformLocation;
-static PFNGLUNIFORMMATRIX4FVPROC        pUniformMatrix4fv;
-static PFNGLUNIFORM4FPROC               pUniform4f;
-static PFNGLDELETESHADERPROC            pDeleteShader;
-
-template<class T> static bool load(T& fp, const char* nm) {
-    fp = (T)SDL_GL_GetProcAddress(nm); return fp != nullptr;
-}
-static void init() {
-    g_tried = true;
-    bool ok = load(pGenBuffers,"glGenBuffers") && load(pBindBuffer,"glBindBuffer")
-        && load(pBufferData,"glBufferData") && load(pGenVertexArrays,"glGenVertexArrays")
-        && load(pBindVertexArray,"glBindVertexArray") && load(pEnableVertexAttribArray,"glEnableVertexAttribArray")
-        && load(pVertexAttribPointer,"glVertexAttribPointer") && load(pCreateShader,"glCreateShader")
-        && load(pShaderSource,"glShaderSource") && load(pCompileShader,"glCompileShader")
-        && load(pCreateProgram,"glCreateProgram") && load(pAttachShader,"glAttachShader")
-        && load(pBindAttribLocation,"glBindAttribLocation") && load(pLinkProgram,"glLinkProgram")
-        && load(pUseProgram,"glUseProgram") && load(pGetUniformLocation,"glGetUniformLocation")
-        && load(pUniformMatrix4fv,"glUniformMatrix4fv") && load(pUniform4f,"glUniform4f")
-        && load(pDeleteShader,"glDeleteShader");
-    if (!ok) return;
-    const char* vs = "#version 130\nin vec3 aPos;\nuniform mat4 uMVP;\n"
-                     "void main(){ gl_Position = uMVP*vec4(aPos,1.0); }\n";
-    const char* fs = "#version 130\nuniform vec4 uColor;\nout vec4 frag;\n"
-                     "void main(){ frag = uColor; }\n";
-    GLuint v = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(v,1,&vs,nullptr); pCompileShader(v);
-    GLuint f = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(f,1,&fs,nullptr); pCompileShader(f);
-    g_prog = pCreateProgram(); pAttachShader(g_prog,v); pAttachShader(g_prog,f);
-    pBindAttribLocation(g_prog,0,"aPos"); pLinkProgram(g_prog);
-    pDeleteShader(v); pDeleteShader(f);
-    g_uMVP = pGetUniformLocation(g_prog,"uMVP"); g_uColor = pGetUniformLocation(g_prog,"uColor");
-    pGenVertexArrays(1,&g_vao); pGenBuffers(1,&g_vbo); pGenBuffers(1,&g_ebo);
-    pBindVertexArray(g_vao);
-    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
-    pEnableVertexAttribArray(0);
-    pVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,(const void*)0);
-    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
-    pBindVertexArray(0);
-    g_ok = true;
-}
-static void upload(const std::vector<float>& verts, const std::vector<uint32_t>& edges) {
-    if (!g_ok) return;
-    pBindVertexArray(g_vao);
-    pBindBuffer(GL_ARRAY_BUFFER,g_vbo);
-    pBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size()*sizeof(float)), verts.data(), GL_STATIC_DRAW);
-    pBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ebo);
-    pBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(edges.size()*sizeof(uint32_t)), edges.data(), GL_STATIC_DRAW);
-    pBindVertexArray(0);
-    g_edge_count = (GLsizei)edges.size();
-}
-struct DrawParams { float mvp[16]; float col[4]; int vx, vy, vw, vh; };
-static DrawParams g_dp;
-// Runs inside ImGui's render pass (one GL draw call). ImDrawCallback_ResetRenderState
-// (queued right after) restores ImGui's own GL state.
-static void draw_cb(const ImDrawList*, const ImDrawCmd*) {
-    if (!g_ok || g_edge_count == 0) return;
-    GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
-    glViewport(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
-    glEnable(GL_SCISSOR_TEST); glScissor(g_dp.vx, g_dp.vy, g_dp.vw, g_dp.vh);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
-    pUseProgram(g_prog);
-    pUniformMatrix4fv(g_uMVP, 1, GL_FALSE, g_dp.mvp);
-    pUniform4f(g_uColor, g_dp.col[0], g_dp.col[1], g_dp.col[2], g_dp.col[3]);
-    pBindVertexArray(g_vao);
-    glDrawElements(GL_LINES, g_edge_count, GL_UNSIGNED_INT, (const void*)0);
-    pBindVertexArray(0);
-    glDisable(GL_SCISSOR_TEST);
-    glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
-}
-// column-major 4x4 helpers
-static void m_perspective(float* m, float fovy, float aspect, float zn, float zf) {
-    float f = 1.0f / tanf(fovy*0.5f);
-    for (int i = 0; i < 16; ++i) m[i] = 0.0f;
-    m[0]=f/aspect; m[5]=f; m[10]=(zf+zn)/(zn-zf); m[11]=-1.0f; m[14]=(2.0f*zf*zn)/(zn-zf);
-}
-static void m_lookat(float* m, float ex,float ey,float ez) {   // look at origin, up +Y
-    float fx=-ex, fy=-ey, fz=-ez; float fl=sqrtf(fx*fx+fy*fy+fz*fz); if(fl<1e-6f)fl=1; fx/=fl;fy/=fl;fz/=fl;
-    float sx=-fz, sy=0.0f, sz=fx;                                      // right = cross(forward,+Y)
-    float sl=sqrtf(sx*sx+sy*sy+sz*sz); if(sl<1e-6f){sx=1;sy=0;sz=0;sl=1;} sx/=sl;sy/=sl;sz/=sl;
-    float ux=sy*fz-sz*fy, uy=sz*fx-sx*fz, uz=sx*fy-sy*fx;              // up = cross(right,forward)
-    m[0]=sx; m[4]=sy; m[8]=sz;  m[12]=-(sx*ex+sy*ey+sz*ez);
-    m[1]=ux; m[5]=uy; m[9]=uz;  m[13]=-(ux*ex+uy*ey+uz*ez);
-    m[2]=-fx;m[6]=-fy;m[10]=-fz;m[14]=(fx*ex+fy*ey+fz*ez);
-    m[3]=0;  m[7]=0;  m[11]=0;  m[15]=1;
-}
-static void m_mul(float* o, const float* a, const float* b) {  // o = a*b
-    for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r)
-        o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
-}
-} // namespace meshgl
 
 static void mesh_preview_panel(void)
 {
