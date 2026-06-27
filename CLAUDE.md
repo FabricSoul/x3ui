@@ -39,10 +39,20 @@ Auto-loaded every session: **this file** + the **memory index**
   callees/xrefs, and **renames FUN_/DAT_** to grow the KB. → memory `re-rename-in-ghidra`.
 - Commit/push only when the user asks; current work is on branch `feat/sector-map`.
 
-## Keeping the knowledge base robust
-When you learn something durable, **write it down and index it**:
+## Self-learning — keep the knowledge base growing (do this proactively)
+You are a **self-learning agent**: capture durable knowledge *as you work*, without waiting
+to be asked. The moment you (a) verify a new engine fact/offset, (b) get a correction or a
+stated preference from the user, (c) hit a non-obvious gotcha, or (d) finish a feature —
+record it, then continue. Don't let a session end with uncaptured learnings.
+
+Where it goes:
 - Cross-session FACT (engine layout, methodology, preference, env) → a **memory file** +
   a one-line entry in `MEMORY.md` under the right category.
 - Deep verified RECIPE / finding → `docs/x3-render-pipeline.md` (tag **(D)/(L)**).
 - A new FEATURE → a dated **spec + plan** under `docs/superpowers/` + a row in
   `docs/README.md`.
+
+Before writing, check the index for an existing entry and **update it instead of
+duplicating**. Safety net: a **PreCompact hook** (`.claude/settings.json`) reminds you to
+flush learnings before context is compacted — but the primary mechanism is doing it
+proactively, above.

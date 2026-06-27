@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"🧠 self-learning checkpoint (pre-compact) — flushing new knowledge to the KB\", \"hookSpecificOutput\": {\"hookEventName\": \"PreCompact\", \"additionalContext\": \"SELF-LEARNING CHECKPOINT — context is about to be compacted. Before details are summarized away, record any durable NEW knowledge from this session that is not yet in the knowledge base: engine facts/offsets/recipes, methodology lessons, user preferences/corrections, environment gotchas. Per CLAUDE.md — a cross-session FACT: a memory file + a one-line MEMORY.md entry in the right category; a verified engine RECIPE: docs/x3-render-pipeline.md tagged (D)/(L); a new FEATURE: a dated spec+plan + a docs/README.md row. Skip anything already recorded, then continue.\"}}'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
