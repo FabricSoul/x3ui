@@ -17,7 +17,7 @@ IMGUI_SRC := \
 	$(IMGUI)/backends/imgui_impl_sdl2.cpp \
 	$(IMGUI)/backends/imgui_impl_opengl3.cpp
 
-SRC      := src/overlay.cpp src/sector_reader.cpp src/debug_server.cpp src/mesh_render.cpp $(IMGUI_SRC)
+SRC      := src/overlay.cpp src/sector_reader.cpp src/debug_server.cpp $(IMGUI_SRC)
 OBJ      := $(patsubst %.cpp,$(BUILD)/%.o,$(SRC))
 
 CXXFLAGS := -std=c++17 -O2 -fPIC -Wall -pthread \

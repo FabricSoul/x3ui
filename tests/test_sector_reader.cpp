@@ -294,16 +294,10 @@ static void test_name_brace_expand() {
 // A tiny model (3 verts, 1 triangle) read through the model cache + LOD mesh.
 static void test_mesh_wireframe() {
     FakeMem fm;
-    fm.w(0x082a0640, 0x1000);          // g_world_root pointer -> world struct
-    fm.w(0x1000 + 0x14, 0x2000);       // model cache hashmap
-    fm.w(0x2000 + 0, 0x3000);          // buckets
-    fm.w(0x2000 + 4, 4);               // bucket count
     uint32_t obj = 0x5000;
     fm.w(obj + 0x12c, 10);             // model id
     fm.w(obj + 0x138, 0);              // lod index
-    fm.w(0x3000 + ((4 - 1) & 11) * 4, 0x4000);  // bucket[(count-1)&(id+1)] -> node
-    fm.w(0x4000 + 4, 11);              // node.key = id+1
-    fm.w(0x4000 + 8, 0x6000);          // node.model
+    fm.mdl(10, 0x6000);                // model id 10 -> model ptr (engine resolver)
     fm.w(0x6000 + 0xc, 0x7000);        // model.lodarr
     fm.w(0x6000 + 0x10, 2);            // model.lodcount
     fm.w(0x7000 + 1 * 4, 0x8000);      // lod[coarsest=1] -> mesh

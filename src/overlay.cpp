@@ -43,7 +43,6 @@
 #include "backends/imgui_impl_opengl3.h"
 #include "sector_reader.h"
 #include "debug_server.h"
-#include "mesh_render.h"
 
 #define X3UI_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -704,6 +703,18 @@ static x3::Mem make_engine_mem(void)
         cache.emplace(key, out);
         return out;
     };
+    // Resolve a model id to its resident model struct via the engine. Cached so we
+    // make at most one engine call per id (and only for objects we preview).
+    m.model = [](uint32_t id) -> uint32_t {
+        static std::unordered_map<uint32_t, uint32_t> mcache;
+        auto it = mcache.find(id);
+        if (it != mcache.end()) return it->second;
+        typedef int (*resolve_t)(int);
+        static resolve_t resolve = (resolve_t)0x08080ca0;   // model_load_resolve
+        uint32_t mp = (uint32_t)resolve((int)id);
+        mcache.emplace(id, mp);
+        return mp;
+    };
     return m;
 }
 
@@ -1191,59 +1202,78 @@ static void map3d_panel(void)
     ImGui::End();
 }
 
-// ---- experimental: render the selected object's real engine mesh -----------
-static bool   g_mesh_on   = false;
-static float  g_mesh_dist = 200000.0f;   // orbit distance (object world units; tune live)
-static float  g_mesh_yaw  = 0.7f, g_mesh_pitch = 0.3f;
-static bool   g_mesh_spin = true;
-static ImVec4 g_mesh_rect = ImVec4(0, 0, 0, 0);  // preview area (ImGui screen coords)
+// ---- mesh preview: wireframe of the selected object, read from CPU model data
+// and drawn with our own projection (no engine render calls, no GL state). ------
+static float g_mesh_yaw = 0.7f, g_mesh_pitch = 0.3f, g_mesh_dist = 3.2f;
 
 static void mesh_preview_panel(void)
 {
-    ImGui::SetNextWindowSize(ImVec2(360, 380), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("x3ui - mesh preview (exp)")) { ImGui::End(); g_mesh_rect = ImVec4(0,0,0,0); return; }
-    ImGui::Checkbox("render mesh", &g_mesh_on); ImGui::SameLine();
-    ImGui::Checkbox("spin", &g_mesh_spin);
-    if (g_sel_id && g_sel_alive) ImGui::Text("target: #%u", g_sel_id);
-    else if (g_sel_id)           ImGui::TextDisabled("target #%u not in this sector", g_sel_id);
-    else                         ImGui::TextDisabled("left-click an object to select it");
-    ImGui::DragFloat("dist", &g_mesh_dist, g_mesh_dist * 0.02f + 1.0f, 1.0f, 5e8f, "%.0f");
-    ImGui::TextDisabled("drag below to orbit");
+    ImGui::SetNextWindowSize(ImVec2(380, 400), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("x3ui - mesh preview")) { ImGui::End(); return; }
 
-    ImVec2 p0 = ImGui::GetCursorScreenPos();
-    ImVec2 av = ImGui::GetContentRegionAvail();
-    if (av.x > 16 && av.y > 16) {
-        ImGui::InvisibleButton("meshcanvas", av);
-        if (ImGui::IsItemActive()) {
-            ImVec2 d = ImGui::GetIO().MouseDelta;
-            g_mesh_yaw   -= d.x * 0.01f;
-            g_mesh_pitch += d.y * 0.01f;
-            g_mesh_spin = false;
+    // Re-read geometry only when the selection changes (it's static per object).
+    static uint32_t cached = 0;
+    static x3::MeshWire wire;
+    static float cx = 0, cy = 0, cz = 0, extent = 1;
+    if (g_sel_addr && g_sel_alive && g_sel_addr != cached) {
+        wire = x3::read_mesh_wireframe(make_engine_mem(), g_sel_addr);
+        cached = g_sel_addr;
+        if (wire.ok) {
+            float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+            for (size_t i = 0; i + 2 < wire.verts.size(); i += 3)
+                for (int k = 0; k < 3; ++k) {
+                    lo[k] = std::min(lo[k], wire.verts[i + k]);
+                    hi[k] = std::max(hi[k], wire.verts[i + k]);
+                }
+            cx = (lo[0]+hi[0])*0.5f; cy = (lo[1]+hi[1])*0.5f; cz = (lo[2]+hi[2])*0.5f;
+            extent = std::max(std::max(hi[0]-lo[0], hi[1]-lo[1]), hi[2]-lo[2]) * 0.5f;
+            if (extent < 1e-4f) extent = 1.0f;
         }
-        if (g_mesh_spin) g_mesh_yaw += ImGui::GetIO().DeltaTime * 0.6f;
-        ImGui::GetWindowDrawList()->AddRect(p0, ImVec2(p0.x + av.x, p0.y + av.y),
-                                            IM_COL32(60, 80, 120, 120));
-        g_mesh_rect = ImVec4(p0.x, p0.y, av.x, av.y);
-    } else g_mesh_rect = ImVec4(0, 0, 0, 0);
-    ImGui::End();
-}
+    }
+    if (!g_sel_addr)        { ImGui::TextDisabled("left-click an object to select it"); ImGui::End(); return; }
+    if (!g_sel_alive)       { ImGui::TextDisabled("#%u not in this sector", g_sel_id);  ImGui::End(); return; }
+    if (!wire.ok)           { ImGui::TextDisabled("no mesh for #%u (not loaded?)", g_sel_id); ImGui::End(); return; }
 
-// Called after ImGui has drawn, so the engine mesh paints on top of the panel.
-static void mesh_preview_render(void)
-{
-    if (!g_mesh_on || !g_sel_addr || !g_sel_alive) return;
-    if (g_mesh_rect.z < 8 || g_mesh_rect.w < 8) return;
-    ImGuiIO& io = ImGui::GetIO();
-    float sx = io.DisplayFramebufferScale.x, sy = io.DisplayFramebufferScale.y;
-    float fb_h = io.DisplaySize.y * sy;
-    x3::MeshView mv;
-    mv.gx = (int)(g_mesh_rect.x * sx);
-    mv.gw = (int)(g_mesh_rect.z * sx);
-    mv.gh = (int)(g_mesh_rect.w * sy);
-    mv.gy = (int)(fb_h - (g_mesh_rect.y * sy + mv.gh));   // flip top-left -> GL bottom-left
-    mv.yaw = g_mesh_yaw; mv.pitch = g_mesh_pitch; mv.dist = g_mesh_dist;
-    mv.clear_depth = true;
-    x3::mesh_render_object(g_sel_addr, mv);
+    static bool spin = true;
+    ImGui::Text("#%u   %zu verts  %zu tris", g_sel_id, wire.vcount(), wire.edges.size() / 6);
+    ImGui::SameLine(); ImGui::Checkbox("spin", &spin);
+    ImGui::SameLine(); ImGui::TextDisabled("drag orbit · wheel zoom");
+
+    ImVec2 av = ImGui::GetContentRegionAvail();
+    if (av.x < 32 || av.y < 32) { ImGui::End(); return; }
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImVec2 p1 = ImVec2(p0.x + av.x, p0.y + av.y);
+    ImVec2 ctr = ImVec2(p0.x + av.x * 0.5f, p0.y + av.y * 0.5f);
+    float focal = av.y * 0.5f / tanf(0.45f);
+    ImGui::InvisibleButton("meshcanvas", av);
+    if (ImGui::IsItemActive()) {
+        ImVec2 d = ImGui::GetIO().MouseDelta;
+        g_mesh_yaw -= d.x * 0.01f; g_mesh_pitch += d.y * 0.01f; spin = false;
+        g_mesh_pitch = g_mesh_pitch > 1.5f ? 1.5f : (g_mesh_pitch < -1.5f ? -1.5f : g_mesh_pitch);
+    }
+    if (spin) g_mesh_yaw += ImGui::GetIO().DeltaTime * 0.5f;
+    if (ImGui::IsItemHovered()) {
+        float wh = ImGui::GetIO().MouseWheel;
+        if (wh != 0.0f) g_mesh_dist *= powf(0.85f, wh);
+        g_mesh_dist = g_mesh_dist < 1.4f ? 1.4f : (g_mesh_dist > 20.0f ? 20.0f : g_mesh_dist);
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(p0, p1, true);
+    dl->AddRectFilled(p0, p1, IM_COL32(8, 10, 18, 255));
+    Camera3D pc; pc.yaw = g_mesh_yaw; pc.pitch = g_mesh_pitch; pc.dist = g_mesh_dist;
+    const float s = 1.0f / extent;                    // normalize model to ~unit size
+    auto PV = [&](uint32_t vi, ImVec2& out, float& dep) {
+        return project3d(pc, ctr, focal, (wire.verts[vi*3+0] - cx) * s,
+                         (wire.verts[vi*3+1] - cy) * s, (wire.verts[vi*3+2] - cz) * s, out, dep);
+    };
+    for (size_t e = 0; e + 1 < wire.edges.size(); e += 2) {
+        ImVec2 a, b; float da, db;
+        if (PV(wire.edges[e], a, da) && PV(wire.edges[e+1], b, db))
+            dl->AddLine(a, b, IM_COL32(120, 200, 255, 110), 1.0f);
+    }
+    dl->PopClipRect();
+    ImGui::End();
 }
 
 static void overlay_draw(void)
@@ -1306,7 +1336,6 @@ static void overlay_draw(void)
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    mesh_preview_render();   // engine mesh on top of the preview panel (default off)
 }
 
 // ---- interposed: per-frame buffer swap -----------------------------------

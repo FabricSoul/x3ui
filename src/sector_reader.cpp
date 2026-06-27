@@ -19,31 +19,14 @@ std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id) {
     return mem.text ? mem.text(page, id) : std::string();
 }
 
-// Look up a model pointer by id via the engine's resident model cache (a hashmap
-// at *( *(0x082a0640) + 0x14 ), keyed by id+1). All reads via mem; 0 if not found.
-static uint32_t model_cache_lookup(const Mem& mem, uint32_t id) {
-    uint32_t world = 0, hashmap = 0, buckets = 0, count = 0, node = 0;
-    if (!ru32(mem, 0x082a0640u, world) || !world) return 0;
-    if (!ru32(mem, world + 0x14, hashmap) || !hashmap) return 0;
-    if (!ru32(mem, hashmap, buckets) || !buckets) return 0;
-    if (!ru32(mem, hashmap + 4, count) || !count) return 0;
-    uint32_t key = id + 1;
-    if (!ru32(mem, buckets + ((count - 1) & key) * 4, node)) return 0;
-    for (int g = 0; node && g < 1024; ++g) {
-        uint32_t k = 0;
-        if (!ru32(mem, node + 4, k)) break;
-        if (k == key) { uint32_t m = 0; ru32(mem, node + 8, m); return m; }
-        if (!ru32(mem, node, node)) break;
-    }
-    return 0;
-}
-
 MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
                              size_t vcap, size_t ecap) {
     MeshWire w;
     uint32_t id = 0;
     if (!ru32(mem, obj + 0x12c, id) || (int32_t)id < 0) return w;
-    uint32_t model = model_cache_lookup(mem, id);
+    // Resolve the resident model pointer via the engine (model_load_resolve cache
+    // hit); all geometry below is then pure reads.
+    uint32_t model = mem.model ? mem.model(id) : 0;
     if (!model) return w;
 
     // mesh = *( *(model+0xc)[lod] ), lod from obj+0x138 (or the coarsest LOD).
