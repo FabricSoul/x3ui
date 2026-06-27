@@ -697,6 +697,7 @@ static void map_panel(void)
     static x3::SectorView view;
     static double last = -1.0;
     static bool frozen = false;          // hover state captured at end of last frame
+    static float s_scrollY = 0.0f, s_scrollMaxY = 0.0f;   // TEMP DIAG
     double now = ImGui::GetTime();
     if (!frozen && (last < 0.0 || (now - last) > 0.15)) {
         view = x3::read_current_sector(make_engine_mem());
@@ -741,9 +742,12 @@ static void map_panel(void)
             ImGui::Text("%.1f, %.1f, %.1f", o.x / x3::off::UNITS_PER_KM,
                         o.y / x3::off::UNITS_PER_KM, o.z / x3::off::UNITS_PER_KM);
         }
+        s_scrollY    = ImGui::GetScrollY();
+        s_scrollMaxY = ImGui::GetScrollMaxY();
         ImGui::EndTable();
     }
-    ImGui::TextDisabled("frozen=%d (refresh pauses while hovering)", frozen ? 1 : 0);
+    ImGui::TextDisabled("frozen=%d  scrollY=%.0f/%.0f  wheel=%.2f",
+                        frozen ? 1 : 0, s_scrollY, s_scrollMaxY, ImGui::GetIO().MouseWheel);
     frozen = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
                                     ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     ImGui::End();
