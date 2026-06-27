@@ -99,38 +99,93 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
     return read_node_mesh(mem, obj, coarsest ? LOD_COARSEST : LOD_NODE, vcap, ecap);
 }
 
+namespace {
+// 3x4 affine transform, row-major; column 3 is translation.
+struct Mat34 { float m[12]; };
+Mat34 mat_identity() { Mat34 r{}; r.m[0] = r.m[5] = r.m[10] = 1.0f; return r; }
+Mat34 mat_mul(const Mat34& a, const Mat34& b) {  // a then b's parent: a ∘ b
+    Mat34 r{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j)
+            r.m[i*4+j] = a.m[i*4+0]*b.m[0*4+j] + a.m[i*4+1]*b.m[1*4+j] + a.m[i*4+2]*b.m[2*4+j];
+        r.m[i*4+3] = a.m[i*4+0]*b.m[3] + a.m[i*4+1]*b.m[7] + a.m[i*4+2]*b.m[11] + a.m[i*4+3];
+    }
+    return r;
+}
+void mat_apply(const Mat34& m, float x, float y, float z, float& ox, float& oy, float& oz) {
+    ox = m.m[0]*x + m.m[1]*y + m.m[2]*z  + m.m[3];
+    oy = m.m[4]*x + m.m[5]*y + m.m[6]*z  + m.m[7];
+    oz = m.m[8]*x + m.m[9]*y + m.m[10]*z + m.m[11];
+}
+
+// Translation fixed-point divisor (model-space units, same 2^14 as vertices).
+// CALIBRATE LIVE — see the plan's live-calibration task. If parts sit too
+// close/far, adjust this.
+constexpr float kTransDiv = 16384.0f;
+
+// One node's local transform = T * R * S, read from the node fields.
+Mat34 node_local(const Mem& mem, uint32_t node) {
+    auto gi = [&](uint32_t off) -> int32_t { uint32_t v = 0; ru32(mem, node + off, v); return (int32_t)v; };
+    float R[3][3];
+    int32_t rsum = 0;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) { int32_t r = gi(0x3c + i * 0x10 + j * 4); rsum |= (r < 0 ? -r : r); R[i][j] = r / 65536.0f; }
+    if (rsum == 0) { R[0][0] = R[1][1] = R[2][2] = 1.0f; R[0][1]=R[0][2]=R[1][0]=R[1][2]=R[2][0]=R[2][1]=0.0f; } // not a transform node -> identity
+    float s0 = gi(0x70) / 65536.0f, s1 = gi(0x74) / 65536.0f, s2 = gi(0x78) / 65536.0f;
+    if (s0 == 0.0f && s1 == 0.0f && s2 == 0.0f) { s0 = s1 = s2 = 1.0f; }
+    Mat34 m{};
+    for (int i = 0; i < 3; ++i) { m.m[i*4+0] = R[i][0]*s0; m.m[i*4+1] = R[i][1]*s1; m.m[i*4+2] = R[i][2]*s2; }
+    m.m[3]  = gi(0x2c) / kTransDiv;
+    m.m[7]  = gi(0x30) / kTransDiv;
+    m.m[11] = gi(0x34) / kTransDiv;
+    return m;
+}
+} // namespace
+
 MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
                                size_t node_cap, size_t vcap, size_t ecap) {
     MeshWire out;
     uint32_t root = 0;
     if (!ru32(mem, obj_addr + 0x6c, root) || !root) return out;
 
+    struct Frame { uint32_t node; Mat34 m; };
     std::unordered_set<uint32_t> seen;
-    std::vector<uint32_t> stack;            // DFS over nodes
-    stack.push_back(root);
+    std::vector<Frame> stack;
+    stack.push_back({root, mat_identity()});    // root defines the object frame
     seen.insert(root);
     size_t visited = 0;
 
     while (!stack.empty() && visited < node_cap) {
-        uint32_t node = stack.back(); stack.pop_back();
+        Frame f = stack.back(); stack.pop_back();
         ++visited;
 
-        MeshWire part = read_node_mesh(mem, node, LOD_FINEST, vcap, ecap);
-        // Hard cap: append a part only if it fits whole. Keeps the union bounded
-        // by vcap/ecap and never splits a part (which would invalidate edges).
+        MeshWire part = read_node_mesh(mem, f.node, LOD_FINEST, vcap, ecap);
+        // Hard cap: append a part only if the whole part fits (keeps edges valid).
         if (part.ok &&
             out.verts.size() / 3 + part.verts.size() / 3 <= vcap &&
             out.edges.size() / 2 + part.edges.size() / 2 <= ecap) {
             uint32_t base = (uint32_t)(out.verts.size() / 3);
-            for (float v : part.verts) out.verts.push_back(v);      // Task 3 will transform
-            for (uint32_t e : part.edges) out.edges.push_back(base + e);
+            size_t nv = part.verts.size() / 3;
+            bool bad = false;
+            std::vector<float> tv; tv.reserve(nv * 3);
+            for (size_t i = 0; i < nv && !bad; ++i) {
+                float ox, oy, oz;
+                mat_apply(f.m, part.verts[i*3+0], part.verts[i*3+1], part.verts[i*3+2], ox, oy, oz);
+                if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
+                    std::fabs(ox) > 1e6f || std::fabs(oy) > 1e6f || std::fabs(oz) > 1e6f) bad = true;
+                tv.push_back(ox); tv.push_back(oy); tv.push_back(oz);
+            }
+            if (!bad) {
+                for (float v : tv) out.verts.push_back(v);
+                for (uint32_t e : part.edges) out.edges.push_back(base + e);
+            }
         }
 
-        // enqueue children: head = node+0x0c, walk its sibling list (next = c+0x00)
         uint32_t c = 0;
-        ru32(mem, node + 0x0c, c);
+        ru32(mem, f.node + 0x0c, c);
         for (size_t g = 0; c && g < node_cap; ++g) {
-            if (seen.insert(c).second) stack.push_back(c);
+            if (seen.insert(c).second)
+                stack.push_back({c, mat_mul(f.m, node_local(mem, c))});
             if (!ru32(mem, c + 0x00, c)) break;
         }
     }

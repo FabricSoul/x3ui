@@ -466,6 +466,38 @@ static void test_object_edge_rebase() {
     CHECK(rebased);
 }
 
+static void test_object_transform_translation() {
+    FakeMem fm;
+    uint32_t obj = 0x5000, alloc = 0x60000;
+    fm.w(0x082a0640, 0x100);
+    uint32_t chain = 0x100 + 0x8;
+    reg_model(fm, 10, 1, 0.0f, 0.0f, 0.0f, alloc, chain);   // root model: vert at origin
+    reg_model(fm, 11, 1, 0.0f, 0.0f, 0.0f, alloc, chain);   // child model: vert at origin
+
+    uint32_t root = 0x4000, child = 0x4200;
+    fm.w(obj + 0x6c, root);
+    fm.w(root + 0x12c, 10);
+    fm.w(root + 0xc, child);
+    fm.w(child + 0x12c, 11);
+    // child local transform: identity rotation, unit scale, translation (0.5, -0.25, 0)
+    fm.w(child + 0x3c + 0 * 0x10 + 0, 0x10000);             // R[0][0] = 1.0
+    fm.w(child + 0x3c + 1 * 0x10 + 4, 0x10000);             // R[1][1] = 1.0
+    fm.w(child + 0x3c + 2 * 0x10 + 8, 0x10000);             // R[2][2] = 1.0
+    fm.w(child + 0x70, 0x10000); fm.w(child + 0x74, 0x10000); fm.w(child + 0x78, 0x10000); // scale 1
+    fm.w(child + 0x2c, (uint32_t)(int32_t)(0.5f  * 16384)); //  8192
+    fm.w(child + 0x30, (uint32_t)(int32_t)(-0.25f * 16384));// -4096
+    fm.w(child + 0x34, 0);
+
+    auto w = x3::read_object_wireframe(fm.mem(), obj);
+    CHECK_EQ(w.vcount(), (size_t)2);
+    // child's origin vert must land at the translation (0.5, -0.25, 0)
+    bool placed = false;
+    for (size_t i = 0; i + 3 <= w.verts.size(); i += 3)
+        if (w.verts[i] > 0.49f && w.verts[i] < 0.51f &&
+            w.verts[i+1] > -0.26f && w.verts[i+1] < -0.24f) placed = true;
+    CHECK(placed);
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
@@ -479,6 +511,7 @@ int main() {
     RUN(test_object_finest_lod);
     RUN(test_object_node_cap);
     RUN(test_object_edge_rebase);
+    RUN(test_object_transform_translation);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);
