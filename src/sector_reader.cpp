@@ -178,10 +178,13 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
         //                                 bit27: internal/despawn (the *** UNDEFINED ***
         //                                 type-20 objects the in-game map also drops)
         // (read failures leave the flag 0 -> treated as visible, e.g. in tests).
-        uint32_t f40 = 0, f44 = 0;
+        uint32_t f40 = 0, f44 = 0, f3c = 0;
         ru32(mem, node + off::OBJ_FLAGS,  f40);
         ru32(mem, node + off::OBJ_FLAGS2, f44);
-        bool hidden = (f40 & 0x1u) || (f44 & 0x28000000u);
+        ru32(mem, node + off::OBJ_RACE,   f3c);
+        // ...also drop spaceflies (race 13 wildlife) — clutter, not a contact.
+        bool hidden = (f40 & 0x1u) || (f44 & 0x28000000u) ||
+                      ((int16_t)(f3c & 0xFFFF) == off::SPACEFLY_RACE);
 
         if (!hidden) {
             ObjInfo o;
@@ -212,8 +215,7 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
 
             // Owner/race + IFF relation to the player (matches the game's blip color):
             // only ships/stations/factories carry a relation; +0x44 bit30 disables it.
-            uint32_t rw = 0;
-            if (ru32(mem, node + off::OBJ_RACE, rw)) o.race = (int16_t)(rw & 0xFFFF);
+            o.race = (int16_t)(f3c & 0xFFFF);
             bool has_iff = (o.type == off::TYPE_SHIP || o.type == off::TYPE_STATION ||
                             o.type == off::TYPE_FACTORY) && !(f44 & off::NO_IFF_FLAG);
             if (rc && has_iff) {
@@ -243,8 +245,8 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
             // Ships beyond the scanner range are hidden, matching the gravidar.
             // (The +0x40 bit3 "0x8" is set ON out-of-range contacts here, so it is
             // NOT a "show anyway" flag — we cull every ship past the range.)
-            bool out_of_range = (rc && rc->valid && o.type == off::TYPE_SHIP &&
-                                 (int64_t)o.dist > rc->range);
+            bool out_of_range = (rc && rc->valid && rc->cull_range &&
+                                 o.type == off::TYPE_SHIP && (int64_t)o.dist > rc->range);
             if (!out_of_range)
                 out.push_back(std::move(o));
         }
@@ -306,7 +308,7 @@ static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
     return rc;
 }
 
-SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap) {
+SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap, bool cull_range) {
     SectorView v;
     uint32_t scene = 0;
     if (!ru32(mem, scene_global, scene) || !scene) return v;
@@ -338,6 +340,7 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     if (ru32(mem, sector + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
         v.sector_name = mem.cstr(nameptr, 64);
     RangeCtx rc = resolve_range_ctx(mem, scene);
+    rc.cull_range = cull_range;
     v.scanner_range = rc.valid ? rc.range : 0;
     // Player position for the 3D map center (independent of scanner range).
     {

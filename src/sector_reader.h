@@ -60,6 +60,7 @@ struct RangeCtx {
     int64_t  range = 0;               // scanner range (raw units)
     int16_t  player_race  = -1;       // player ship race id (for the IFF relation)
     uint32_t player_ship  = 0;        // the player's own ship address (== REL_OWN)
+    bool     cull_range   = false;    // true: hide ships beyond scanner range (gravidar mode)
 };
 
 // Convenience alias to the scene-global address (aliases the single source of
@@ -76,7 +77,8 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr,
 // `scene_global` is the ADDRESS that holds the scene-mgr pointer.
 SectorView read_current_sector(const Mem& mem,
                                uint32_t scene_global = off_SCENE_GLOBAL,
-                               size_t cap = 4096);
+                               size_t cap = 4096,
+                               bool cull_range = false);
 
 // Human label for a type id (+0x48). Returns a static string.
 const char* type_label(int16_t type);

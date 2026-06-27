@@ -51,6 +51,7 @@ constexpr uint32_t GATE_DEST_ARRAY = 0x58;
 
 // Owner / race / IFF (matches the game's sector-map blip coloring).
 constexpr uint32_t OBJ_RACE      = 0x3c; // int16 owner/race id 0..31 (read via object_get_relation)
+constexpr int16_t  SPACEFLY_RACE = 13;   // race 13 = spaceflies (wildlife; filtered out)
 constexpr uint32_t NO_IFF_FLAG   = 0x40000000u; // (+0x44 byte3 bit6): object has no IFF relation
 // payload (ship/station/factory) relation bitmasks, indexed by (1 << viewer_race):
 constexpr uint32_t REL_FRIEND_MASK = 0x48; // *(payload+0x48): friend if bit set
