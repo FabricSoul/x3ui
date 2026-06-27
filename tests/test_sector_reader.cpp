@@ -517,6 +517,30 @@ static void test_object_tri_emission() {
     CHECK(rebased);
 }
 
+// --- bulk byte read path matches the per-u32 path -------------------------------
+static void test_bulk_read_matches() {
+    FakeMem fm;
+    uint32_t obj = 0x5000, alloc = 0x60000;
+    fm.w(0x082a0640, 0x100);
+    uint32_t chain = 0x100 + 0x8;
+    reg_model(fm, 20, 3, 0.25f, -0.5f, 0.75f, alloc, chain);   // root: 3 verts + 1 tri
+    reg_model(fm, 21, 3, 0.1f, 0.2f, -0.3f, alloc, chain);     // child: 3 verts + 1 tri
+    uint32_t root = 0x4000, child = 0x4200;
+    fm.w(obj + 0x6c, root);
+    fm.w(root + 0x12c, 20);
+    fm.w(root + 0xc, child);
+    fm.w(child + 0x12c, 21);
+    auto a = x3::read_object_wireframe(fm.mem(false), obj);    // per-u32 path
+    auto b = x3::read_object_wireframe(fm.mem(true),  obj);    // bulk Mem::bytes path
+    CHECK(a.ok && b.ok);
+    CHECK_EQ(a.verts.size(), b.verts.size());
+    CHECK_EQ(a.tris.size(),  b.tris.size());
+    bool same = (a.verts.size() == b.verts.size() && a.tris.size() == b.tris.size());
+    for (size_t i = 0; same && i < a.verts.size(); ++i) if (a.verts[i] != b.verts[i]) same = false;
+    for (size_t i = 0; same && i < a.tris.size();  ++i) if (a.tris[i]  != b.tris[i])  same = false;
+    CHECK(same);
+}
+
 // --- node world orientation read (16.16, transposed/col-major) ------------------
 static void test_read_node_orient() {
     // Unset node (every field reads 0) => returns false + identity in out.
@@ -579,6 +603,7 @@ int main() {
     RUN(test_object_node_cap);
     RUN(test_object_edge_rebase);
     RUN(test_object_tri_emission);
+    RUN(test_bulk_read_matches);
     RUN(test_read_node_orient);
     RUN(test_vertex_normals);
     RUN(test_object_transform_translation);

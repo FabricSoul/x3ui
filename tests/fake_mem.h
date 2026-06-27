@@ -16,11 +16,23 @@ struct FakeMem {
         texts[((uint64_t)page << 32) | id] = str;
     }
 
-    x3::Mem mem() {
+    x3::Mem mem(bool with_bytes = false) {
         x3::Mem m;
         auto* W = &words;
         auto* S = &strings;
         auto* T = &texts;
+        if (with_bytes) {
+            m.bytes = [W](uint32_t a, void* dst, size_t n) -> bool {
+                uint8_t* d = (uint8_t*)dst;
+                for (size_t i = 0; i < n; ++i) {           // assemble LE bytes from words (unset -> 0)
+                    uint32_t aa = a + (uint32_t)i;
+                    auto it = W->find(aa & ~3u);
+                    uint32_t w = (it == W->end()) ? 0u : it->second;
+                    d[i] = (uint8_t)(w >> ((aa & 3u) * 8));
+                }
+                return true;
+            };
+        }
         m.u32 = [W](uint32_t a, uint32_t& o) -> bool {
             auto it = W->find(a);
             if (it == W->end()) return false;

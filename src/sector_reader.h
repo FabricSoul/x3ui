@@ -34,6 +34,10 @@ struct Mem {
     // Resolve a {textPage, textID} reference to its string (the engine does the
     // lookup + marker expansion). "" if unset/unavailable. Optional.
     std::function<std::string(uint32_t page, uint32_t id)> text;
+    // Bulk-read `n` raw bytes at `addr` into `dst` (one shot). Optional fast path for
+    // big arrays (verts/tris); when unset, callers fall back to per-word u32 reads.
+    // Returns false if any part is unreadable.
+    std::function<bool(uint32_t addr, void* dst, size_t n)> bytes;
 };
 
 struct SectorView {

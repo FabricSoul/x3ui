@@ -57,15 +57,30 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
     if (!ru32(mem, mesh + 0x0, vcount) || !vcount || vcount > vcap) return w;
     if (!ru32(mem, mesh + 0x8, verts) || !verts) return w;
     w.verts.reserve(vcount * 3);
-    for (uint32_t i = 0; i < vcount; ++i) {
-        uint32_t a = 0, b = 0;
-        if (!ru32(mem, verts + i * 0x18 + 0, a) || !ru32(mem, verts + i * 0x18 + 4, b)) {
-            w.verts.clear(); return w;
+    if (mem.bytes) {
+        // Fast path: one bulk read of the whole vertex array (stride 0x18, int16 xyz).
+        std::vector<uint8_t> vb((size_t)vcount * 0x18);
+        if (!mem.bytes(verts, vb.data(), vb.size())) { w.verts.clear(); return w; }
+        for (uint32_t i = 0; i < vcount; ++i) {
+            const uint8_t* p = vb.data() + (size_t)i * 0x18;
+            int16_t x = (int16_t)(p[0] | (p[1] << 8));
+            int16_t y = (int16_t)(p[2] | (p[3] << 8));
+            int16_t z = (int16_t)(p[4] | (p[5] << 8));
+            w.verts.push_back(x / 16384.0f);
+            w.verts.push_back(y / 16384.0f);
+            w.verts.push_back(z / 16384.0f);
         }
-        int16_t x = (int16_t)(a & 0xFFFF), y = (int16_t)(a >> 16), z = (int16_t)(b & 0xFFFF);
-        w.verts.push_back(x / 16384.0f);
-        w.verts.push_back(y / 16384.0f);
-        w.verts.push_back(z / 16384.0f);
+    } else {
+        for (uint32_t i = 0; i < vcount; ++i) {
+            uint32_t a = 0, b = 0;
+            if (!ru32(mem, verts + i * 0x18 + 0, a) || !ru32(mem, verts + i * 0x18 + 4, b)) {
+                w.verts.clear(); return w;
+            }
+            int16_t x = (int16_t)(a & 0xFFFF), y = (int16_t)(a >> 16), z = (int16_t)(b & 0xFFFF);
+            w.verts.push_back(x / 16384.0f);
+            w.verts.push_back(y / 16384.0f);
+            w.verts.push_back(z / 16384.0f);
+        }
     }
 
     uint32_t pcw = 0, parts = 0;
@@ -94,9 +109,25 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
             uint32_t tcount = 0, tris = 0;
             ru32(mem, grp + 0x0, tcount); ru32(mem, grp + 0x4, tris);
             if (!tris || tcount > ecap) continue;
+            // Fast path: one bulk read of the group's triangle array (stride 0x10).
+            std::vector<uint8_t> tb;
+            const bool fast = (bool)mem.bytes;
+            if (fast) {
+                tb.resize((size_t)tcount * 0x10);
+                if (!mem.bytes(tris, tb.data(), tb.size())) continue;
+            }
+            auto le32 = [](const uint8_t* p) -> uint32_t {
+                return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+            };
             for (uint32_t t = 0; t < tcount && w.edges.size() < ecap * 2; ++t) {
-                uint32_t tri = tris + t * 0x10, v0 = 0, v1 = 0, v2 = 0;
-                if (!ru32(mem, tri + 0, v0) || !ru32(mem, tri + 4, v1) || !ru32(mem, tri + 8, v2)) break;
+                uint32_t v0 = 0, v1 = 0, v2 = 0;
+                if (fast) {
+                    const uint8_t* p = tb.data() + (size_t)t * 0x10;
+                    v0 = le32(p); v1 = le32(p + 4); v2 = le32(p + 8);
+                } else {
+                    uint32_t tri = tris + t * 0x10;
+                    if (!ru32(mem, tri + 0, v0) || !ru32(mem, tri + 4, v1) || !ru32(mem, tri + 8, v2)) break;
+                }
                 add_edge(v0, v1); add_edge(v1, v2); add_edge(v2, v0);
                 if (v0 < vcount && v1 < vcount && v2 < vcount) {
                     w.tris.push_back(v0); w.tris.push_back(v1); w.tris.push_back(v2);

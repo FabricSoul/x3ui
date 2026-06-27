@@ -159,6 +159,19 @@ static bool mem_read_i32(uintptr_t addr, int32_t *out)
     return pread(g_memfd, out, sizeof(*out), (off_t)addr) == (ssize_t)sizeof(*out);
 }
 
+// Bulk read: one (looped) pread for the whole range — orders of magnitude fewer
+// syscalls than per-int reads when pulling big vertex/triangle arrays.
+static bool mem_read_bytes(uintptr_t addr, void *dst, size_t n)
+{
+    size_t done = 0;
+    while (done < n) {
+        ssize_t r = pread(g_memfd, (char *)dst + done, n - done, (off_t)(addr + done));
+        if (r <= 0) return false;
+        done += (size_t)r;
+    }
+    return true;
+}
+
 // Writable, anonymous-ish regions where game state lives (skip stack/vdso).
 static void mem_regions(std::vector<std::pair<uintptr_t, uintptr_t>> &regs)
 {
@@ -674,6 +687,9 @@ static x3::Mem make_engine_mem(void)
         o = (uint32_t)v;
         return true;
     };
+    m.bytes = [](uint32_t addr, void* dst, size_t n) -> bool {
+        return mem_read_bytes((uintptr_t)addr, dst, n);
+    };
     m.cstr = [](uint32_t addr, size_t maxlen) -> std::string {
         std::string s;
         if (!addr) return s;
@@ -1180,38 +1196,29 @@ static void m_mul(float* o, const float* a, const float* b) {  // o = a*b
 }
 } // namespace meshgl
 
-// ---- solid hull cache (read once per object, placed live each frame) -----------
+// ---- solid hull cache (read ONCE at finest, placed live each frame) -------------
 struct HullCache {
     meshgl::Hull gpu;
     float        extent_km = 1.0f;   // body bbox half-extent in km (for dot<->hull + box)
     uint32_t     model_id  = 0;      // root model id at read time (re-read if it changes)
-    int          lod       = -1;     // map LOD at read time
     bool         ok        = false;
 };
 static std::unordered_map<uint32_t, HullCache> g_hulls;   // key = object address
-static int g_map_lod = 0;   // coarsen bias added to the auto distance LOD (0 = full detail)
 
-// Pick a model LOD from the hull's apparent screen radius: bigger -> finer (lower).
-static int lod_for_rpx(float rpx) {
-    if (rpx >= 90.0f) return 0;     // filling the view -> finest
-    if (rpx >= 45.0f) return 1;
-    if (rpx >= 20.0f) return 2;
-    return 3;                       // small-but-still-a-hull -> coarse
-}
-
-// Ensure object `addr` (root model `mid`) has a cached hull at `want_lod`. Reads only
-// when missing/stale; returns nullptr if it has no resolvable mesh (or budget spent and
-// nothing cached yet). `budget` is decremented per actual (expensive) read.
-static HullCache* hull_ensure(uint32_t addr, uint32_t mid, int want_lod, int& budget) {
+// Ensure object `addr` (root model `mid`) has its FINEST-LOD hull cached. Reads at most
+// once per object (re-reads only if its model id changes) — never re-read for zoom, so
+// there's no per-frame geometry cost after the first read. Bulk byte reads (Mem::bytes)
+// keep even a 130k-tri station read cheap. Returns nullptr if it has no resolvable mesh.
+static HullCache* hull_ensure(uint32_t addr, uint32_t mid, int& budget) {
     auto it = g_hulls.find(addr);
-    if (it != g_hulls.end() && it->second.lod == want_lod && it->second.model_id == mid)
-        return it->second.ok ? &it->second : nullptr;
-    if (budget <= 0) return (it != g_hulls.end() && it->second.ok) ? &it->second : nullptr;
+    if (it != g_hulls.end() && it->second.model_id == mid)
+        return it->second.ok ? &it->second : nullptr;      // already read (or known mesh-less)
+    if (budget <= 0) return nullptr;
     --budget;
     HullCache hc;
-    hc.model_id = mid; hc.lod = want_lod;
+    hc.model_id = mid;
     x3::Mem mem = make_engine_mem();
-    x3::MeshWire w = x3::read_object_wireframe(mem, addr, 512, 200000, 600000, want_lod, 1000);
+    x3::MeshWire w = x3::read_object_wireframe(mem, addr, 512, 200000, 600000, /*lod=*/0, 1000);
     if (w.ok && !w.tris.empty()) {
         // Un-rotate world-oriented geometry into body frame by R_read^T (root+0x3c).
         uint32_t root = 0; float R[9] = {1,0,0, 0,1,0, 0,0,1};
@@ -1284,10 +1291,8 @@ static void map3d_panel(void)
     ImGui::SameLine();
     if (focus_addr) ImGui::TextDisabled("dbl-click focus · MMB pan · (tracking)");
     else            ImGui::TextDisabled("dbl-click focus · MMB pan");
-    ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-    ImGui::SliderInt("coarsen", &g_map_lod, 0, 4);   // 0 = full auto detail; higher = coarser/faster
     hull_gc(view.objects);
-    int hull_budget = 2;                 // expensive geometry reads per frame
+    int hull_budget = 3;                 // first-read geometry budget per frame (one-time)
     meshgl::g_solids.clear();
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -1445,23 +1450,13 @@ static void map3d_panel(void)
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; e.hull = nullptr; e.rpx = 0; float gd;
         e.gok = PROJ(KX(o.x), 0, KZ(o.z), e.ground, gd);
-        // Hull promotion + distance-driven LOD. The root node's +0x6c is NOT the object
-        // size (the mesh lives on child nodes), so read once at a coarse LOD to learn the
-        // true extent, then refine actual hulls' LOD by apparent screen size. Skip the
-        // huge Sun/Planet backdrops (keep them as blips).
+        // Hull promotion: read each object's finest mesh once (cached), then show it as a
+        // hull when big enough on screen, else a dot. Skip huge Sun/Planet backdrops.
         bool hullable = (o.type != x3::off::TYPE_SUN && o.type != x3::off::TYPE_PLANET);
         uint32_t root = 0, mid = 0;
         if (hullable && x3::read_object_root(emem, o.addr, root)) {
             emem.u32(root + 0x12c, mid);
-            auto cit = g_hulls.find(o.addr);
-            bool have = (cit != g_hulls.end() && cit->second.ok);
-            float rpx = have ? cit->second.extent_km / d * focal : 0.0f;
-            int want;
-            if (!have)           want = 4;                              // coarse first read -> extent
-            else if (rpx > 6.0f) want = lod_for_rpx(rpx) + g_map_lod;   // hull -> distance LOD
-            else                 want = cit->second.lod;               // dot -> keep, no re-read
-            want = want < 0 ? 0 : (want > 6 ? 6 : want);
-            HullCache* hc = hull_ensure(o.addr, mid, want, hull_budget);
+            HullCache* hc = hull_ensure(o.addr, mid, hull_budget);
             if (hc) { e.rpx = hc->extent_km / d * focal; if (e.rpx > 6.0f) e.hull = hc; }
         }
         ps.push_back(e);
