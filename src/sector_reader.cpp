@@ -19,14 +19,16 @@ std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id) {
     return mem.text ? mem.text(page, id) : std::string();
 }
 
-MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
-                             size_t vcap, size_t ecap) {
+// LOD selection for one node's mesh.
+enum LodSel { LOD_NODE = 0, LOD_COARSEST = 1, LOD_FINEST = 2 };
+
+// Read ONE node/object's mesh from resident CPU model data. `node` supplies the
+// model id (+0x12c) and (for LOD_NODE) the LOD index (+0x138). Pure reads, bounded.
+static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
+                               size_t vcap, size_t ecap) {
     MeshWire w;
     uint32_t id = 0;
-    if (!ru32(mem, obj + 0x12c, id) || (int32_t)id < 0) return w;
-    // Resolve the resident model by id via the global model list (head *(world+0x8),
-    // next *(m+0x4), id *(m+0x8)) — pure reads, no engine call (calling
-    // model_load_resolve outside the render pass poisons the engine's neg-cache).
+    if (!ru32(mem, node + 0x12c, id) || (int32_t)id < 0) return w;
     uint32_t world = 0;
     if (!ru32(mem, 0x082a0640u, world) || !world) return w;
     uint32_t model = 0, mm = 0;
@@ -38,13 +40,13 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
     }
     if (!model) return w;
 
-    // mesh = *( *(model+0xc)[lod] ), lod from obj+0x138 (or the coarsest LOD).
     uint32_t lodarr = 0, lodcnt = 0, lod = 0;
     if (!ru32(mem, model + 0xc, lodarr) || !lodarr) return w;
     ru32(mem, model + 0x10, lodcnt); lodcnt &= 0xFFFF;
-    if (!ru32(mem, obj + 0x138, lod)) lod = 0;
-    if (coarsest && lodcnt) lod = lodcnt - 1;
-    else if (lodcnt && lod >= lodcnt) lod = lodcnt - 1;
+    if (lodsel == LOD_COARSEST)    lod = lodcnt ? lodcnt - 1 : 0;
+    else if (lodsel == LOD_FINEST) lod = 0;
+    else { if (!ru32(mem, node + 0x138, lod)) lod = 0;
+           if (lodcnt && lod >= lodcnt) lod = lodcnt - 1; }
     uint32_t mesh = 0;
     if (!ru32(mem, lodarr + lod * 4, mesh) || !mesh) return w;
 
@@ -63,7 +65,6 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
         w.verts.push_back(z / 16384.0f);
     }
 
-    // triangle edges: mesh part list -> material groups -> triangles (v0,v1,v2).
     uint32_t pcw = 0, parts = 0;
     ru32(mem, mesh + 0x4, pcw); int pcount = (int16_t)(pcw & 0xFFFF);
     ru32(mem, mesh + 0x10, parts);
@@ -90,6 +91,11 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
     }
     w.ok = !w.verts.empty();
     return w;
+}
+
+MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
+                             size_t vcap, size_t ecap) {
+    return read_node_mesh(mem, obj, coarsest ? LOD_COARSEST : LOD_NODE, vcap, ecap);
 }
 
 // Replace each "{page, id}" token in a name with its resolved text. Tokens that
