@@ -1319,8 +1319,10 @@ static void map3d_panel(void)
         cam.yaw = atan2f(view.player_fwd_x, view.player_fwd_z);
     if (hov) {                                         // wheel zooms (dolly)
         float wh = ImGui::GetIO().MouseWheel;
-        if (wh != 0.0f) cam.dist *= powf(0.85f, wh);
-        cam.dist = cam.dist < 3.0f ? 3.0f : (cam.dist > 600.0f ? 600.0f : cam.dist);
+        if (wh != 0.0f) cam.dist *= powf(0.8f, wh);    // a touch faster (range now 0.1..600 km)
+        // min 0.1 km so small ships (~0.05 km) can fill the view: rpx = ext/depth*focal
+        // (above the 0.02 km GPU near-plane / 0.05 km projection cutoff).
+        cam.dist = cam.dist < 0.1f ? 0.1f : (cam.dist > 600.0f ? 600.0f : cam.dist);
     }
     // Ease the look-at center toward its target (frame-rate independent lerp).
     {
