@@ -2,3 +2,4 @@ build/
 libx3ui.so
 test_so.so
 *.o
+x3autoload.env

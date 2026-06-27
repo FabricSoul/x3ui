@@ -19,5 +19,17 @@ case "$SteamAppId" in
 esac
 [ -x "./$ENGINE" ] || ENGINE=X3TC_main   # last-ditch fallback
 
-echo "[x3engine] launching $ENGINE (AppId=$SteamAppId) with overlay" >&2
-exec "./$ENGINE"
+# --- x3ui auto-load (optional) -------------------------------------------------
+# x3launch.sh writes x3autoload.env; if X3_FASTSTART_SLOT is a save slot number,
+# boot straight into save/X<NN>.sav (skip intro + main menu) so the debug socket
+# comes up in flight. Empty/absent => normal boot to menu. This file is read here
+# (inside the pressure-vessel container) because host env doesn't reliably cross
+# the Steam -> reaper -> pressure-vessel boundary.
+ARGS=()
+[ -f /home/fabric/x3ui/x3autoload.env ] && . /home/fabric/x3ui/x3autoload.env
+if [ -n "${X3_FASTSTART_SLOT:-}" ]; then
+    ARGS+=(-skipintro -faststart "$X3_FASTSTART_SLOT")
+fi
+
+echo "[x3engine] launching $ENGINE (AppId=$SteamAppId) overlay args: ${ARGS[*]:-(none)}" >&2
+exec "./$ENGINE" "${ARGS[@]}"
