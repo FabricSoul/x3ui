@@ -17,7 +17,8 @@ static int16_t read_type(const Mem& m, uint32_t obj) {
     return (int16_t)(w & 0xFFFF);
 }
 
-std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, size_t cap) {
+std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, size_t cap,
+                                         const RangeCtx* rc) {
     std::vector<ObjInfo> out;
     if (!sector_addr) return out;
 
@@ -61,7 +62,18 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
                 if (ru32(mem, tf + off::TF_Y, w)) o.y = (int32_t)w;
                 if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
             }
-            out.push_back(std::move(o));
+
+            // Scanner-range gate: ships beyond the player's scanner range are hidden
+            // (matching the gravidar), unless the object is already known (+0x40&0x8).
+            bool out_of_range = false;
+            if (rc && rc->valid && o.type == off::TYPE_SHIP && !(f40 & off::FLAG_KNOWN)) {
+                int64_t dx = (int64_t)o.x - rc->px;
+                int64_t dy = (int64_t)o.y - rc->py;
+                int64_t dz = (int64_t)o.z - rc->pz;
+                out_of_range = (dx * dx + dy * dy + dz * dz) > rc->range * rc->range;
+            }
+            if (!out_of_range)
+                out.push_back(std::move(o));
         }
 
         uint32_t next = 0;
@@ -69,6 +81,49 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
         node = next;
     }
     return out;
+}
+
+// Resolve player position + scanner range for the visibility test. Walks the
+// gravidar out of the HUD manager's hashmap (the one whose scanner source == the
+// player ship) and reads its cached scanner range. Returns {valid=false} if
+// anything is unavailable -> no range filtering.
+static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
+    RangeCtx rc;
+    uint32_t player = 0, ptf = 0, px = 0, py = 0, pz = 0;
+    if (!ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, player) || !player) return rc;
+    if (!ru32(mem, player + off::OBJ_TRANSFORM, ptf) || !ptf) return rc;
+    if (!ru32(mem, ptf + off::TF_X, px) || !ru32(mem, ptf + off::TF_Y, py) ||
+        !ru32(mem, ptf + off::TF_Z, pz)) return rc;
+
+    uint32_t hud = 0, hmap = 0, buckets = 0, mask = 0;
+    if (!ru32(mem, off::HUD_MGR_GLOBAL, hud) || !hud) return rc;
+    if (!ru32(mem, hud, hmap) || !hmap) return rc;                       // hashmap = *(hud)
+    if (!ru32(mem, hmap + off::HASH_BUCKETS, buckets) || !buckets) return rc;
+    ru32(mem, hmap + off::HASH_MASK, mask);
+
+    uint32_t range = 0;
+    uint32_t lim = (mask < 1024) ? mask : 1024;
+    for (uint32_t i = 0; i <= lim && !range; ++i) {
+        uint32_t node = 0;
+        if (!ru32(mem, buckets + i * 4, node)) continue;
+        for (int guard = 0; node && guard < 64; ++guard) {
+            uint32_t grav = 0, src = 0;
+            if (ru32(mem, node + off::HASH_NODE_VALUE, grav) && grav &&
+                ru32(mem, grav + off::GRAVIDAR_SOURCE, src) && src == player) {
+                ru32(mem, grav + off::GRAVIDAR_RANGE, range);
+                break;
+            }
+            uint32_t nxt = 0;
+            if (!ru32(mem, node + off::HASH_NODE_NEXT, nxt)) break;
+            node = nxt;
+        }
+    }
+    if (!range) return rc;
+
+    rc.valid = true;
+    rc.px = (int32_t)px; rc.py = (int32_t)py; rc.pz = (int32_t)pz;
+    rc.range = (int64_t)(int32_t)range;
+    return rc;
 }
 
 SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap) {
@@ -102,7 +157,8 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     uint32_t nameptr = 0;
     if (ru32(mem, sector + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
         v.sector_name = mem.cstr(nameptr, 64);
-    v.objects = read_sector_objects(mem, sector, cap);
+    RangeCtx rc = resolve_range_ctx(mem, scene);
+    v.objects = read_sector_objects(mem, sector, cap, &rc);
 
     // Stable display order by object id, so the live 6 Hz refresh doesn't reshuffle
     // rows under the user (which made the table scroll snap/twitch).

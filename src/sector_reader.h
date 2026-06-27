@@ -32,14 +32,24 @@ struct SectorView {
     std::vector<ObjInfo> objects;
 };
 
+// Player position + scanner range, for the gravidar visibility test (ships beyond
+// the scanner range are hidden, matching the in-game sector map). `valid` false =
+// no range filtering applied.
+struct RangeCtx {
+    bool    valid = false;
+    int32_t px = 0, py = 0, pz = 0;   // player position (raw units, 500000/km)
+    int64_t range = 0;                // scanner range (raw units)
+};
+
 // Convenience alias to the scene-global address (aliases the single source of
 // truth in struct_offsets.h — no duplicate literal). Must precede the function
 // that defaults to it.
 constexpr uint32_t off_SCENE_GLOBAL = off::SCENE_GLOBAL;
 
 // Walk the contained-object list of a type-7 sector object. cap bounds iterations.
+// If `rc` is non-null and valid, ships beyond the scanner range are dropped.
 std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr,
-                                         size_t cap = 4096);
+                                         size_t cap = 4096, const RangeCtx* rc = nullptr);
 
 // Resolve the player's current sector from the scene-mgr global and read it.
 // `scene_global` is the ADDRESS that holds the scene-mgr pointer.

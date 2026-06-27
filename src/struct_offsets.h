@@ -48,4 +48,14 @@ constexpr int16_t TYPE_GATE     = 0x12;
 // Position units: 1 km = 500000 raw units (object transform x/y/z).
 constexpr float   UNITS_PER_KM  = 500000.0f;
 
+// HUD / gravidar — for the scanner-range visibility test (ships beyond range hide).
+constexpr uint32_t HUD_MGR_GLOBAL  = 0x0837a100u; // *: HUD mgr; *(it) = gravidar hashmap
+constexpr uint32_t HASH_BUCKETS    = 0x00;        // hashtable: bucket-array ptr
+constexpr uint32_t HASH_MASK       = 0x04;        // hashtable: capacity (power of 2)
+constexpr uint32_t HASH_NODE_NEXT  = 0x00;
+constexpr uint32_t HASH_NODE_VALUE = 0x08;
+constexpr uint32_t GRAVIDAR_SOURCE = 0x10;        // scanner source == player ship
+constexpr uint32_t GRAVIDAR_RANGE  = 0x240;       // cached scanner range (int, 500000/km)
+constexpr uint32_t FLAG_KNOWN      = 0x8;         // +0x40 bit3: known/scanned (skips range)
+
 }} // namespace x3::off

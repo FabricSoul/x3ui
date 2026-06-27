@@ -175,9 +175,50 @@ static void test_visibility_filter() {
     CHECK_STR(v.objects[0].name.c_str(), "Visible Ship");
 }
 
+// Scanner-range gate: a ship beyond the player's scanner range is dropped; one
+// inside is kept. The range comes from the gravidar (HUD mgr hashmap -> the
+// gravidar whose source == the player ship -> +0x240).
+static void test_scanner_range_filter() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);              // scene
+    fm.w(0x1000 + 0x08, 0x2000);           // sector
+    fm.w(0x1000 + 0x38, 0x8000);           // player ship
+    fm.w(0x2000 + 0x48, 1);                // sector type
+    fm.w(0x2000 + 0x50, 0x3000);           // payload
+    fm.w(0x3000 + 0x00, 0x4000);           // head -> node1
+    // player at origin
+    fm.w(0x8000 + 0x6c, 0x8100);
+    fm.w(0x8100 + 0x2c, 0); fm.w(0x8100 + 0x30, 0); fm.w(0x8100 + 0x34, 0);
+    // HUD mgr -> hashmap -> buckets[0] -> node -> gravidar (source=player, range=20km)
+    fm.w(0x0837a100, 0x9000);
+    fm.w(0x9000 + 0x00, 0x9100);           // hashmap = *(hud)
+    fm.w(0x9100 + 0x00, 0x9200);           // buckets
+    fm.w(0x9100 + 0x04, 0);                // mask = 0 (one bucket)
+    fm.w(0x9200 + 0x00, 0x9300);           // buckets[0] -> node
+    fm.w(0x9300 + 0x08, 0x9400);           // node.value = gravidar
+    fm.w(0x9400 + 0x10, 0x8000);           // gravidar source == player
+    fm.w(0x9400 + 0x240, 10000000);        // scanner range = 20 km
+    // node1: ship at 2 km (in range)
+    fm.w(0x4000 + 0x00, 0x5000);
+    fm.w(0x4000 + 0x08, 1);  fm.w(0x4000 + 0x48, 7);
+    fm.w(0x4000 + 0x0c, 0x9a00); fm.s(0x9a00, "Near Ship");
+    fm.w(0x4000 + 0x6c, 0x4100); fm.w(0x4100 + 0x2c, (uint32_t)1000000);
+    // node2: ship at 30 km (out of range)
+    fm.w(0x5000 + 0x00, 0x3004);
+    fm.w(0x5000 + 0x08, 2);  fm.w(0x5000 + 0x48, 7);
+    fm.w(0x5000 + 0x0c, 0x9b00); fm.s(0x9b00, "Far Ship");
+    fm.w(0x5000 + 0x6c, 0x5100); fm.w(0x5100 + 0x2c, (uint32_t)15000000);
+
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK(v.in_sector);
+    CHECK_EQ(v.objects.size(), (size_t)1);
+    CHECK_STR(v.objects[0].name.c_str(), "Near Ship");
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
+    RUN(test_scanner_range_filter);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);
