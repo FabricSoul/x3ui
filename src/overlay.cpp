@@ -709,19 +709,32 @@ static void map_panel(void)
         return;
     }
 
-    ImGui::Text("sector: %s  @ 0x%08x   (%zu objects)",
+    // Per-category counts so the visible total can be compared to the game's map.
+    int n_ships = 0, n_stations = 0;
+    for (const auto& o : view.objects) {
+        if (o.type == x3::off::TYPE_SHIP) ++n_ships;
+        else if (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY) ++n_stations;
+    }
+
+    ImGui::Text("sector: %s   (%zu objects: %d ships, %d stations)",
                 view.sector_name.empty() ? "(unnamed)" : view.sector_name.c_str(),
-                view.sector_addr, view.objects.size());
+                view.objects.size(), n_ships, n_stations);
 
     // Filter categories: 0 = all, 1 = ships (type 7), 2 = stations (type 5/6).
     static int filter = 0;
     ImGui::RadioButton("all", &filter, 0);       ImGui::SameLine();
     ImGui::RadioButton("ships", &filter, 1);     ImGui::SameLine();
     ImGui::RadioButton("stations", &filter, 2);
+    int shown = (filter == 1) ? n_ships
+              : (filter == 2) ? n_stations
+                              : (int)view.objects.size();
+    ImGui::SameLine(); ImGui::TextDisabled("|  showing %d", shown);
 
+    // Fill the rest of the window so the whole list is visible (resize the window
+    // to see more; the size persists via imgui.ini).
     if (ImGui::BeginTable("objs", 4,
-            ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
-            ImGuiTableFlags_RowBg, ImVec2(0, 320))) {
+            ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg,
+            ImVec2(0, ImGui::GetContentRegionAvail().y))) {
         ImGui::TableSetupColumn("id");
         ImGui::TableSetupColumn("type");
         ImGui::TableSetupColumn("name");
