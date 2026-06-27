@@ -98,4 +98,13 @@ struct MeshWire {
 MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj_addr, bool coarsest = true,
                              size_t vcap = 60000, size_t ecap = 200000);
 
+// Assemble a whole object's wireframe by walking its scene graph from the
+// transform node (obj+0x6c): DFS children (node+0x0c) and siblings (node+0x00),
+// reading each mesh-bearing node at finest LOD and (Task 3) composing transforms.
+// Pure reads + bounded (node_cap / vcap / ecap). Proxy and unloaded nodes are
+// skipped. Returns {ok=false} if no part resolved.
+MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
+                               size_t node_cap = 512, size_t vcap = 200000,
+                               size_t ecap = 600000);
+
 } // namespace x3

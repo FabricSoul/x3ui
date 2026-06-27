@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <unordered_set>
 
 namespace x3 {
 
@@ -96,6 +97,41 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
 MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
                              size_t vcap, size_t ecap) {
     return read_node_mesh(mem, obj, coarsest ? LOD_COARSEST : LOD_NODE, vcap, ecap);
+}
+
+MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
+                               size_t node_cap, size_t vcap, size_t ecap) {
+    MeshWire out;
+    uint32_t root = 0;
+    if (!ru32(mem, obj_addr + 0x6c, root) || !root) return out;
+
+    std::unordered_set<uint32_t> seen;
+    std::vector<uint32_t> stack;            // DFS over nodes
+    stack.push_back(root);
+    seen.insert(root);
+    size_t visited = 0;
+
+    while (!stack.empty() && visited < node_cap) {
+        uint32_t node = stack.back(); stack.pop_back();
+        ++visited;
+
+        MeshWire part = read_node_mesh(mem, node, LOD_FINEST, vcap, ecap);
+        if (part.ok && out.verts.size() / 3 < vcap && out.edges.size() / 2 < ecap) {
+            uint32_t base = (uint32_t)(out.verts.size() / 3);
+            for (float v : part.verts) out.verts.push_back(v);      // Task 3 will transform
+            for (uint32_t e : part.edges) out.edges.push_back(base + e);
+        }
+
+        // enqueue children: head = node+0x0c, walk its sibling list (next = c+0x00)
+        uint32_t c = 0;
+        ru32(mem, node + 0x0c, c);
+        for (size_t g = 0; c && g < node_cap; ++g) {
+            if (seen.insert(c).second) stack.push_back(c);
+            if (!ru32(mem, c + 0x00, c)) break;
+        }
+    }
+    out.ok = !out.verts.empty();
+    return out;
 }
 
 // Replace each "{page, id}" token in a name with its resolved text. Tokens that

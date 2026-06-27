@@ -327,6 +327,109 @@ static void test_mesh_wireframe() {
     CHECK(w.verts[4] > 0.99f && w.verts[4] < 1.01f);   // v1.y = 1.0
 }
 
+// --- object wireframe (scene-graph walk) ---------------------------------------
+// Register a resident model `id` with ONE LOD of `nv` verts at (vx,vy,vz) into the
+// world model list, chaining onto `*chain_field`. Advances `*alloc`. No triangles.
+static uint32_t reg_model(FakeMem& fm, uint32_t id, int nv,
+                          float vx, float vy, float vz,
+                          uint32_t& alloc, uint32_t& chain_field) {
+    uint32_t model = alloc; alloc += 0x100;
+    uint32_t lodarr = alloc; alloc += 0x40;
+    uint32_t mesh = alloc; alloc += 0x40;
+    uint32_t vbuf = alloc; alloc += (uint32_t)nv * 0x18 + 0x20;
+    fm.w(chain_field, model);                 // link previous .next (or world head) -> model
+    fm.w(model + 0x8, id);
+    fm.w(model + 0x4, 0);                      // this model's .next = end (until another is added)
+    chain_field = model + 0x4;
+    fm.w(model + 0xc, lodarr);
+    fm.w(model + 0x10, 1);                     // 1 LOD
+    fm.w(lodarr + 0, mesh);
+    fm.w(mesh + 0, (uint32_t)nv);
+    fm.w(mesh + 8, vbuf);
+    fm.w(mesh + 4, 0);                         // 0 parts -> no edges (fine for these tests)
+    int16_t ix = (int16_t)(vx * 16384.0f), iy = (int16_t)(vy * 16384.0f), iz = (int16_t)(vz * 16384.0f);
+    for (int i = 0; i < nv; ++i) {
+        fm.w(vbuf + i * 0x18 + 0, ((uint32_t)(uint16_t)iy << 16) | (uint16_t)ix);
+        fm.w(vbuf + i * 0x18 + 4, (uint16_t)iz);
+    }
+    return mesh;
+}
+
+static void test_object_walk_union() {
+    FakeMem fm;
+    uint32_t obj = 0x5000, alloc = 0x60000;
+    fm.w(0x082a0640, 0x100);                   // world root ptr
+    uint32_t chain = 0x100 + 0x8;              // list head field
+    reg_model(fm, 10, 1, 1.0f, 0.0f, 0.0f, alloc, chain);   // root's model: vert (1,0,0)
+    reg_model(fm, 11, 1, 0.0f, 1.0f, 0.0f, alloc, chain);   // child's model: vert (0,1,0)
+
+    uint32_t root = 0x4000, child = 0x4200, proxy = 0x4400;
+    fm.w(obj + 0x6c, root);                     // obj -> transform node
+    fm.w(root + 0x12c, 10);                     // root carries model 10
+    fm.w(root + 0xc, child);                    // root.firstChild -> child
+    fm.w(child + 0x12c, 11);                    // child carries model 11
+    fm.w(child + 0x00, proxy);                  // child.nextSibling -> proxy
+    fm.w(proxy + 0x12c, 999);                   // proxy model id not resident -> skipped
+    fm.w(proxy + 0x00, child);                  // proxy.nextSibling -> child (cycle: must terminate)
+
+    auto w = x3::read_object_wireframe(fm.mem(), obj);
+    CHECK(w.ok);
+    CHECK_EQ(w.vcount(), (size_t)2);            // root vert + child vert; proxy skipped, no infinite loop
+    // root vert (1,0,0) and child vert (0,1,0) both present (order independent)
+    bool hasRoot = false, hasChild = false;
+    for (size_t i = 0; i + 2 < w.verts.size() + 1; i += 3) {
+        if (w.verts[i] > 0.99f && w.verts[i+1] < 0.01f) hasRoot = true;
+        if (w.verts[i] < 0.01f && w.verts[i+1] > 0.99f) hasChild = true;
+    }
+    CHECK(hasRoot); CHECK(hasChild);
+}
+
+static void test_object_finest_lod() {
+    FakeMem fm;
+    uint32_t obj = 0x5000;
+    fm.w(0x082a0640, 0x100);
+    fm.w(0x100 + 0x8, 0x6000);                  // head -> model
+    fm.w(0x6000 + 0x8, 7);                      // model id 7
+    fm.w(0x6000 + 0x4, 0);
+    fm.w(0x6000 + 0xc, 0x6100);                 // lodarr
+    fm.w(0x6000 + 0x10, 2);                     // 2 LODs
+    fm.w(0x6100 + 0, 0x6200);                   // lod[0] FINEST -> meshFine
+    fm.w(0x6100 + 4, 0x6300);                   // lod[1] coarsest -> meshCoarse
+    fm.w(0x6200 + 0, 2); fm.w(0x6200 + 8, 0x6280); fm.w(0x6200 + 4, 0);  // fine: 2 verts
+    fm.w(0x6280 + 0 * 0x18 + 0, 0); fm.w(0x6280 + 0 * 0x18 + 4, 0);
+    fm.w(0x6280 + 1 * 0x18 + 0, 0); fm.w(0x6280 + 1 * 0x18 + 4, 0);
+    fm.w(0x6300 + 0, 1); fm.w(0x6300 + 8, 0x6380); fm.w(0x6300 + 4, 0);  // coarse: 1 vert
+    fm.w(0x6380 + 0, 0); fm.w(0x6380 + 4, 0);
+
+    uint32_t root = 0x4000;
+    fm.w(obj + 0x6c, root);
+    fm.w(root + 0x12c, 7);                       // single-node object
+    auto w = x3::read_object_wireframe(fm.mem(), obj);
+    CHECK(w.ok);
+    CHECK_EQ(w.vcount(), (size_t)2);             // finest LOD (2 verts), not coarsest (1)
+}
+
+static void test_object_node_cap() {
+    FakeMem fm;
+    uint32_t obj = 0x5000, alloc = 0x60000;
+    fm.w(0x082a0640, 0x100);
+    uint32_t chain = 0x100 + 0x8;
+    reg_model(fm, 10, 1, 0.0f, 0.0f, 0.0f, alloc, chain);
+    uint32_t root = 0x4000;
+    fm.w(obj + 0x6c, root);
+    fm.w(root + 0x12c, 10);
+    // a long sibling chain of children, all model 10
+    uint32_t prev_sib_field = root + 0xc;        // root.firstChild
+    for (int i = 0; i < 20; ++i) {
+        uint32_t n = 0x40000 + (uint32_t)i * 0x40;
+        fm.w(prev_sib_field, n);
+        fm.w(n + 0x12c, 10);
+        prev_sib_field = n + 0x00;               // chain via nextSibling
+    }
+    auto w = x3::read_object_wireframe(fm.mem(), obj, /*node_cap=*/4);
+    CHECK(w.vcount() <= (size_t)4);              // bounded; never hangs
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
@@ -336,6 +439,9 @@ int main() {
     RUN(test_text_db_resolve);
     RUN(test_name_brace_expand);
     RUN(test_mesh_wireframe);
+    RUN(test_object_walk_union);
+    RUN(test_object_finest_lod);
+    RUN(test_object_node_cap);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);
