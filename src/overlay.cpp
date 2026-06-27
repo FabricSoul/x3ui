@@ -1035,6 +1035,37 @@ static void map3d_panel(void)
         return project3d(cam, ctr, focal, wx - cam.cx, wy - cam.cy, wz - cam.cz, s, d);
     };
 
+    // Homeworld-style sensor sphere: a dim, soft dark-blue shell at scanner range,
+    // drawn first so the grid + objects sit in front of it.
+    if (view.scanner_range > 0) {
+        float r = (float)view.scanner_range / U;
+        ImVec2 c; float d0;
+        if (PROJ(0, 0, 0, c, d0) && d0 > 0.2f) {           // soft volume + rim (no hard edge)
+            float sr = r / d0 * focal;                     // apparent screen radius
+            if (sr > 4.0f && sr < 9000.0f) {
+                dl->AddCircleFilled(c, sr, IM_COL32(22, 52, 116, 16), 64);
+                for (int k = 0; k < 7; ++k) {
+                    int a = 44 - k * 7;
+                    dl->AddCircle(c, sr - k, IM_COL32(46, 96, 190, a < 0 ? 0 : a), 80, 1.5f);
+                }
+            }
+        }
+        // faint wireframe great circles to sell the 3D shell
+        ImU32 wc = IM_COL32(50, 100, 190, 30);
+        auto great = [&](float ax, float ay, float az, float bx, float by, float bz) {
+            ImVec2 prev; bool has = false; float d;
+            for (int i = 0; i <= 48; ++i) {
+                float t = i / 48.0f * 6.2831853f, ca = cosf(t), sa = sinf(t); ImVec2 s;
+                if (PROJ(r*(ax*ca+bx*sa), r*(ay*ca+by*sa), r*(az*ca+bz*sa), s, d)) {
+                    if (has) dl->AddLine(prev, s, wc, 1.0f); prev = s; has = true;
+                } else has = false;
+            }
+        };
+        great(1,0,0, 0,0,1);   // equator (ecliptic plane)
+        great(1,0,0, 0,1,0);   // vertical
+        great(0,0,1, 0,1,0);   // vertical
+    }
+
     // ecliptic grid on y=0
     {
         const float G = 40.0f, step = 10.0f; ImU32 gc = IM_COL32(40, 70, 110, 90);
@@ -1044,19 +1075,6 @@ static void map3d_panel(void)
             if (PROJ(-G, 0, g, a, d) && PROJ( G, 0, g, b, d)) dl->AddLine(a, b, gc, 1.0f);
         }
     }
-    // scanner-range ring on the plane
-    if (view.scanner_range > 0) {
-        float r = (float)view.scanner_range / U;
-        ImVec2 prev; bool has = false; float d;
-        for (int i = 0; i <= 48; ++i) {
-            float a = (float)i / 48.0f * 6.2831853f; ImVec2 s;
-            if (PROJ(r*cosf(a), 0, r*sinf(a), s, d)) {
-                if (has) dl->AddLine(prev, s, IM_COL32(70, 180, 200, 130), 1.5f);
-                prev = s; has = true;
-            } else has = false;
-        }
-    }
-
     // objects: project, depth-sort far->near, draw drop line + glow + dot + label
     struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
     std::vector<PObj> ps; ps.reserve(view.objects.size());
