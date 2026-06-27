@@ -1302,19 +1302,29 @@ static void map3d_panel(void)
     static uint32_t focus_addr = 0;     // dbl-clicked object the look-at center tracks (0 = none)
 
     static int map3d_rel = 0, map3d_type = 0;   // independent of the table's filter
-    map_filter_bar(&map3d_rel, &map3d_type);
-    static bool follow = false;         // lock the camera yaw to the ship's heading
-    ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
-    ImGui::Checkbox("follow ship", &follow);
-    ImGui::SameLine();
-    if (ImGui::Button("reset view")) {           // re-center + re-orient (e.g. after undocking)
-        cam.tx = cam.ty = cam.tz = 0;
-        cam.yaw = 0.7f; cam.pitch = 0.5f; cam.dist = 70.0f;
-        focus_addr = 0;
-    }
+    static bool follow = false;        // lock the camera yaw to the ship's heading
+    static bool show_axes = false;     // orientation gizmo on the selected object
+    static bool show_cfg = false;      // collapsible settings child
+
+    // Compact header: a settings toggle + the always-useful hint. Everything tweakable
+    // lives in the collapsible child below so the panel isn't a wall of buttons.
+    if (ImGui::SmallButton(show_cfg ? "settings -" : "settings +")) show_cfg = !show_cfg;
     ImGui::SameLine();
     if (focus_addr) ImGui::TextDisabled("dbl-click focus · MMB pan · (tracking)");
     else            ImGui::TextDisabled("dbl-click focus · MMB pan");
+    if (show_cfg) {
+        ImGui::BeginChild("map_cfg", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 2.4f), true);
+        map_filter_bar(&map3d_rel, &map3d_type);
+        ImGui::Checkbox("follow ship", &follow);
+        ImGui::SameLine(); ImGui::Checkbox("orient axes (selected)", &show_axes);
+        ImGui::SameLine();
+        if (ImGui::Button("reset view")) {       // re-center + re-orient (e.g. after undocking)
+            cam.tx = cam.ty = cam.tz = 0;
+            cam.yaw = 0.7f; cam.pitch = 0.5f; cam.dist = 70.0f;
+            focus_addr = 0;
+        }
+        ImGui::EndChild();
+    }
     hull_gc(view.objects);
     int hull_budget = 3;                 // first-read geometry budget per frame (one-time)
     meshgl::g_solids.clear();
@@ -1537,10 +1547,10 @@ static void map3d_panel(void)
             dl->AddLine(ImVec2(c.x-r,c.y+r), ImVec2(c.x-r,c.y+r-L), bc, 1.6f);
             dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r-L,c.y+r), bc, 1.6f);
             dl->AddLine(ImVec2(c.x+r,c.y+r), ImVec2(c.x+r,c.y+r-L), bc, 1.6f);
-            // orientation gizmo (selected only): forward/up/right axes so heading AND roll
-            // are directly visible. Axes are Rl*local-axis, i.e. aligned with the hull.
+            // orientation gizmo (selected only, toggle): forward/up/right axes so heading
+            // AND roll are directly visible. Axes are Rl*local-axis, aligned with the hull.
             uint32_t sroot = 0; float SR[9];
-            if (x3::read_object_root(emem, o.addr, sroot) && x3::read_node_orient(emem, sroot, 0x3c, SR)) {
+            if (show_axes && x3::read_object_root(emem, o.addr, sroot) && x3::read_node_orient(emem, sroot, 0x3c, SR)) {
                 float len = e.depth * 0.10f; const float Fp[3] = {1.0f,-1.0f,-1.0f};
                 auto axis = [&](int cc, ImU32 col2) {        // cc = column = local axis index
                     float ax=SR[0*3+cc], ay=SR[1*3+cc], az=SR[2*3+cc];
@@ -1675,10 +1685,17 @@ static void mesh_preview_panel(void)
     if (!wire.ok)           { ImGui::TextDisabled("no mesh for #%u (not loaded?)", g_sel_id); ImGui::End(); return; }
 
     static bool spin = true;
+    static bool mp_cfg = false;
     ImGui::Text("#%u   %zu verts  %zu tris", g_sel_id, wire.vcount(), wire.edges.size() / 6);
-    ImGui::SameLine(); ImGui::Checkbox("spin", &spin);
-    ImGui::SameLine(); ImGui::SetNextItemWidth(70); ImGui::SliderInt("LOD", &g_mesh_lod, 0, 6);
-    ImGui::SameLine(); ImGui::TextDisabled("drag · wheel");
+    ImGui::SameLine();
+    if (ImGui::SmallButton(mp_cfg ? "settings -" : "settings +")) mp_cfg = !mp_cfg;
+    if (mp_cfg) {
+        ImGui::BeginChild("mp_cfg", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 1.4f), true);
+        ImGui::Checkbox("spin", &spin);
+        ImGui::SameLine(); ImGui::SetNextItemWidth(70); ImGui::SliderInt("LOD", &g_mesh_lod, 0, 6);
+        ImGui::SameLine(); ImGui::TextDisabled("drag · wheel");
+        ImGui::EndChild();
+    }
 
     ImVec2 av = ImGui::GetContentRegionAvail();
     if (av.x < 32 || av.y < 32) { ImGui::End(); return; }
