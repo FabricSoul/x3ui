@@ -213,7 +213,7 @@ static void test_scanner_range_filter() {
     fm.w(0x5000 + 0x0c, 0x9b00); fm.s(0x9b00, "Far Ship");
     fm.w(0x5000 + 0x6c, 0x5100); fm.w(0x5100 + 0x2c, (uint32_t)15000000);
 
-    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL, 4096, /*cull_range=*/true);
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
     CHECK(v.in_sector);
     CHECK_EQ(v.objects.size(), (size_t)1);
     CHECK_STR(v.objects[0].name.c_str(), "Near Ship");

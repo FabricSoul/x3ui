@@ -737,8 +737,6 @@ static bool obj_passes_filter(const x3::ObjInfo& o, int relmask, int typemask)
     return (relmask & rel_bit(o.relation)) || (typemask & type_bit(o.type));
 }
 
-static bool g_scanner_only = false;   // off = all sector ships; on = gravidar range only
-
 static void map_filter_bar(int* relmask, int* typemask)
 {
     ImGui::TextDisabled("rel"); ImGui::SameLine();
@@ -752,7 +750,6 @@ static void map_filter_bar(int* relmask, int* typemask)
     ImGui::CheckboxFlags("gates", typemask, TB_GATE);        ImGui::SameLine();
     ImGui::CheckboxFlags("roids", typemask, TB_ROID);        ImGui::SameLine();
     if (ImGui::SmallButton("all")) { *relmask = 0; *typemask = 0; }
-    ImGui::SameLine(); ImGui::Checkbox("scanner range", &g_scanner_only);
 }
 
 static ImU32       faction_color(const x3::ObjInfo& o);   // defined with the 3D map
@@ -785,7 +782,7 @@ static void map_panel(void)
     static bool frozen = false;          // hover state captured at end of last frame
     double now = ImGui::GetTime();
     if (!frozen && (last < 0.0 || (now - last) > 0.15)) {
-        view = x3::read_current_sector(make_engine_mem(), x3::off_SCENE_GLOBAL, 4096, g_scanner_only);
+        view = x3::read_current_sector(make_engine_mem());
         last = now;
     }
 
@@ -976,7 +973,7 @@ static void map3d_panel(void)
     // Refresh every frame so object motion is smooth at the game's frame rate
     // (name lookups are cached, so the per-frame read stays cheap).
     static x3::SectorView view;
-    view = x3::read_current_sector(make_engine_mem(), x3::off_SCENE_GLOBAL, 4096, g_scanner_only);
+    view = x3::read_current_sector(make_engine_mem());
     if (!view.in_sector || !view.player_valid) {
         ImGui::TextDisabled("not in a sector");
         ImGui::End();

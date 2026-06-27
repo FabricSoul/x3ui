@@ -254,7 +254,9 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
             // Ships beyond the scanner range are hidden, matching the gravidar.
             // (The +0x40 bit3 "0x8" is set ON out-of-range contacts here, so it is
             // NOT a "show anyway" flag — we cull every ship past the range.)
-            bool out_of_range = (rc && rc->valid && rc->cull_range &&
+            // Out-of-range SHIPS are hidden (gravidar behavior); stations, gates and
+            // asteroids are not ships, so they always show regardless of range.
+            bool out_of_range = (rc && rc->valid &&
                                  o.type == off::TYPE_SHIP && (int64_t)o.dist > rc->range);
             if (!out_of_range)
                 out.push_back(std::move(o));
@@ -317,7 +319,7 @@ static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
     return rc;
 }
 
-SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap, bool cull_range) {
+SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap) {
     SectorView v;
     uint32_t scene = 0;
     if (!ru32(mem, scene_global, scene) || !scene) return v;
@@ -349,7 +351,6 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     if (ru32(mem, sector + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
         v.sector_name = mem.cstr(nameptr, 64);
     RangeCtx rc = resolve_range_ctx(mem, scene);
-    rc.cull_range = cull_range;
     v.scanner_range = rc.valid ? rc.range : 0;
     // Player position for the 3D map center (independent of scanner range).
     {
