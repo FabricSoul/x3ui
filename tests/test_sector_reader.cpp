@@ -297,7 +297,11 @@ static void test_mesh_wireframe() {
     uint32_t obj = 0x5000;
     fm.w(obj + 0x12c, 10);             // model id
     fm.w(obj + 0x138, 0);              // lod index
-    fm.mdl(10, 0x6000);                // model id 10 -> model ptr (engine resolver)
+    // resident model list: world *(0x082a0640) -> head *(world+0x8) -> model 0x6000
+    fm.w(0x082a0640, 0x100);           // g_world_root pointer
+    fm.w(0x100 + 0x8, 0x6000);         // list head -> model
+    fm.w(0x6000 + 0x8, 10);            // model.id == obj model id
+    fm.w(0x6000 + 0x4, 0);             // model.next = end
     fm.w(0x6000 + 0xc, 0x7000);        // model.lodarr
     fm.w(0x6000 + 0x10, 2);            // model.lodcount
     fm.w(0x7000 + 1 * 4, 0x8000);      // lod[coarsest=1] -> mesh

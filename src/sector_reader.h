@@ -34,9 +34,6 @@ struct Mem {
     // Resolve a {textPage, textID} reference to its string (the engine does the
     // lookup + marker expansion). "" if unset/unavailable. Optional.
     std::function<std::string(uint32_t page, uint32_t id)> text;
-    // Resolve a model id (obj+0x12c) to the resident model struct pointer. 0 if
-    // unavailable. Optional (used only by read_mesh_wireframe).
-    std::function<uint32_t(uint32_t model_id)> model;
 };
 
 struct SectorView {

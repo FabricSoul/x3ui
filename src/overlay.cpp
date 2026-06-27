@@ -703,18 +703,6 @@ static x3::Mem make_engine_mem(void)
         cache.emplace(key, out);
         return out;
     };
-    // Resolve a model id to its resident model struct via the engine. Cached so we
-    // make at most one engine call per id (and only for objects we preview).
-    m.model = [](uint32_t id) -> uint32_t {
-        static std::unordered_map<uint32_t, uint32_t> mcache;
-        auto it = mcache.find(id);
-        if (it != mcache.end()) return it->second;
-        typedef int (*resolve_t)(int);
-        static resolve_t resolve = (resolve_t)0x08080ca0;   // model_load_resolve
-        uint32_t mp = (uint32_t)resolve((int)id);
-        mcache.emplace(id, mp);
-        return mp;
-    };
     return m;
 }
 

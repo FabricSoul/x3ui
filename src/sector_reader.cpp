@@ -24,9 +24,18 @@ MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
     MeshWire w;
     uint32_t id = 0;
     if (!ru32(mem, obj + 0x12c, id) || (int32_t)id < 0) return w;
-    // Resolve the resident model pointer via the engine (model_load_resolve cache
-    // hit); all geometry below is then pure reads.
-    uint32_t model = mem.model ? mem.model(id) : 0;
+    // Resolve the resident model by id via the global model list (head *(world+0x8),
+    // next *(m+0x4), id *(m+0x8)) — pure reads, no engine call (calling
+    // model_load_resolve outside the render pass poisons the engine's neg-cache).
+    uint32_t world = 0;
+    if (!ru32(mem, 0x082a0640u, world) || !world) return w;
+    uint32_t model = 0, mm = 0;
+    ru32(mem, world + 0x8, mm);
+    for (int g = 0; mm && g < 20000; ++g) {
+        uint32_t mid = 0;
+        if (ru32(mem, mm + 0x8, mid) && (int32_t)mid == (int32_t)id) { model = mm; break; }
+        if (!ru32(mem, mm + 0x4, mm)) break;
+    }
     if (!model) return w;
 
     // mesh = *( *(model+0xc)[lod] ), lod from obj+0x138 (or the coarsest LOD).
