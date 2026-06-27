@@ -305,7 +305,10 @@ static void server_thread(int port) {
                 std::string ln = acc.substr(0, nl);
                 acc.erase(0, nl + 1);
                 if (!ln.empty() && ln.back() == '\r') ln.pop_back();
-                std::string resp = dispatch_on_main(ln);   // serviced on the main thread
+                // ping answers on the server thread (no game memory) so it still
+                // works — and reveals a stuck main thread — when the pump is wedged.
+                std::string resp = (ln == "ping") ? std::string("pong")
+                                                  : dispatch_on_main(ln);
                 resp.push_back('\n');
                 if (send(c, resp.data(), resp.size(), MSG_NOSIGNAL) < 0) { r = -1; break; }
             }
