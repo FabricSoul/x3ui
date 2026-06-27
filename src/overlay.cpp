@@ -806,8 +806,24 @@ static void select_target(const x3::ObjInfo& o)
 {
     g_sel_id   = o.id;
     g_sel_addr = o.addr;
-    // TODO(target-bridge): write the engine's current-target global so the game's
-    // targeting brackets follow this object.
+    // Push the selection into the game: resolve the player's gravidar/HUD object and call
+    // the engine target setter (mode 3 = lock + brackets). Calling the function (vs.
+    // raw-writing +0x1bc/+0x1c0) preserves full HUD consistency — lock timestamp, SFX, UI
+    // bits, and the NotifyTargetLock script callback. cdecl is the default on 32-bit x86;
+    // the attribute makes it explicit. o.addr is a live object from this frame's sector walk.
+    if (!o.addr) return;
+    mem_open();
+    x3::Mem m = make_engine_mem();
+    uint32_t scene = 0, player = 0;
+    if (m.u32(x3::off::SCENE_GLOBAL, scene) && scene &&
+        m.u32(scene + x3::off::SCENE_PLAYER_ANCHOR, player) && player) {
+        uint32_t grav = x3::find_player_gravidar(m, player);
+        if (grav) {
+            typedef void (__attribute__((cdecl)) *set_target_t)(void*, int16_t, void*);
+            ((set_target_t)(uintptr_t)x3::off::GRAVIDAR_SET_TARGET_FN)(
+                (void*)(uintptr_t)grav, x3::off::TARGET_MODE_LOCK, (void*)(uintptr_t)o.addr);
+        }
+    }
 }
 
 // Read-only panel: list the objects in the player's current sector.
