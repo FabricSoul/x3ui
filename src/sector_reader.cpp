@@ -116,7 +116,11 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
         ++visited;
 
         MeshWire part = read_node_mesh(mem, node, LOD_FINEST, vcap, ecap);
-        if (part.ok && out.verts.size() / 3 < vcap && out.edges.size() / 2 < ecap) {
+        // Hard cap: append a part only if it fits whole. Keeps the union bounded
+        // by vcap/ecap and never splits a part (which would invalidate edges).
+        if (part.ok &&
+            out.verts.size() / 3 + part.verts.size() / 3 <= vcap &&
+            out.edges.size() / 2 + part.edges.size() / 2 <= ecap) {
             uint32_t base = (uint32_t)(out.verts.size() / 3);
             for (float v : part.verts) out.verts.push_back(v);      // Task 3 will transform
             for (uint32_t e : part.edges) out.edges.push_back(base + e);
