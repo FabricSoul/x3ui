@@ -31,6 +31,21 @@ std::string handle_request(const Mem &mem, const std::string &line) {
 
     if (op == "ping") return "pong";
 
+    if (op == "rss") {   // in-process memory, for leak watching
+        long vmrss = -1, vmsize = -1;
+        FILE *fp = fopen("/proc/self/status", "r");
+        if (fp) {
+            char ln[256];
+            while (fgets(ln, sizeof ln, fp)) {
+                if (!strncmp(ln, "VmRSS:", 6))       sscanf(ln + 6, "%ld", &vmrss);
+                else if (!strncmp(ln, "VmSize:", 7)) sscanf(ln + 7, "%ld", &vmsize);
+            }
+            fclose(fp);
+        }
+        snprintf(b, sizeof b, "ok VmRSS=%ld kB VmSize=%ld kB", vmrss, vmsize);
+        return b;
+    }
+
     if (op == "read") {
         std::string sa; is >> sa;
         uint32_t a = parse_addr(sa), v = 0;

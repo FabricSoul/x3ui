@@ -829,13 +829,13 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
 // ---- interposed: event-queue pump ----------------------------------------
 // X3 reads input by PEEK-ing the queue (SDL_PeepEvents action=PEEK) and acting
 // on it, only GET-ing afterwards to clear it — so filtering GET events is too
-// late. Right after the real pump fills the queue we pull keyboard+mouse out of
-// it, hand them all to ImGui, and RE-INJECT the events the game should still get:
-//   - mouse: kept for the game UNLESS ImGui wants it (cursor over an overlay window)
-//   - keyboard: kept for the game (so hotkeys still work) UNLESS ImGui is capturing
-//     text (a focused overlay input box); ScrollLock is always consumed as the toggle.
-// So clicking/scrolling on the overlay is swallowed, but clicking the game world
-// and game hotkeys pass straight through. When hidden we touch nothing.
+// late. Right after the real pump fills the queue we decide per category:
+//   - mouse: if ImGui wants it (cursor over an overlay window) we DRAIN it (GET)
+//     so the game gets none; otherwise we only PEEK it (feed ImGui for hover
+//     tracking) and leave it in the queue for the game — clicking the game still works.
+//   - keyboard: drained only while an overlay text box is focused (game gets none);
+//     otherwise left for the game so hotkeys work. ScrollLock toggles the overlay.
+// We NEVER re-inject events (no SDL_PushEvent), so there is nothing to leak.
 X3UI_EXPORT void SDL_PumpEvents(void)
 {
     resolve_originals();
@@ -846,42 +846,38 @@ X3UI_EXPORT void SDL_PumpEvents(void)
 
     ImGuiIO &io = ImGui::GetIO();
     SDL_Event buf[64];
-    std::vector<SDL_Event> give_back;   // events the game should still receive
 
-    // Mouse (0x400..0x403): ImGui sees all of it (to know whether it's hovered);
-    // the game keeps what ImGui isn't capturing (cursor not over an overlay window).
-    for (int guard = 0; guard < 64; ++guard) {
-        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
-        if (n <= 0) break;
-        for (int i = 0; i < n; ++i) {
-            ImGui_ImplSDL2_ProcessEvent(&buf[i]);
-            if (!io.WantCaptureMouse)
-                give_back.push_back(buf[i]);
+    // Mouse (0x400..0x403)
+    if (io.WantCaptureMouse) {
+        for (int guard = 0; guard < 64; ++guard) {     // drain: game gets none
+            int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
+            if (n <= 0) break;
+            for (int i = 0; i < n; ++i) ImGui_ImplSDL2_ProcessEvent(&buf[i]);
+            if (n < 64) break;
         }
-        if (n < 64) break;
+    } else {                                            // peek: ImGui tracks, game keeps
+        int n = real_PeepEvents(buf, 64, SDL_PEEKEVENT, SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
+        for (int i = 0; i < n && i < 64; ++i) ImGui_ImplSDL2_ProcessEvent(&buf[i]);
     }
-    // Keyboard incl. text (0x300..0x303): ScrollLock toggles; while an overlay text
-    // box is focused ImGui captures keys, otherwise hotkeys go to the game.
-    for (int guard = 0; guard < 64; ++guard) {
-        int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_KEYDOWN, SDL_TEXTINPUT);
-        if (n <= 0) break;
-        for (int i = 0; i < n; ++i) {
-            SDL_Event &e = buf[i];
-            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_SCROLLLOCK) {
-                g_ui_visible = !g_ui_visible;
-                fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
-                continue;
+
+    // Keyboard incl. text (0x300..0x303). Drained only while capturing text; the
+    // ScrollLock toggle is then caught here, otherwise in the SDL_PeepEvents hook.
+    if (io.WantCaptureKeyboard) {
+        for (int guard = 0; guard < 64; ++guard) {
+            int n = real_PeepEvents(buf, 64, SDL_GETEVENT, SDL_KEYDOWN, SDL_TEXTINPUT);
+            if (n <= 0) break;
+            for (int i = 0; i < n; ++i) {
+                SDL_Event &e = buf[i];
+                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_SCROLLLOCK) {
+                    g_ui_visible = !g_ui_visible;
+                    fprintf(stderr, "[x3ui] overlay %s\n", g_ui_visible ? "shown" : "hidden");
+                    continue;
+                }
+                ImGui_ImplSDL2_ProcessEvent(&e);
             }
-            if (io.WantCaptureKeyboard)
-                ImGui_ImplSDL2_ProcessEvent(&e);   // typing in an overlay field
-            else
-                give_back.push_back(e);            // hotkey -> game
+            if (n < 64) break;
         }
-        if (n < 64) break;
     }
-
-    for (auto &e : give_back)
-        SDL_PushEvent(&e);
 }
 
 // ---- interposed: event pump ----------------------------------------------
