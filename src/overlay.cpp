@@ -859,7 +859,11 @@ static void map_panel(void)
 }
 
 // ---- 3D sector map (orbit camera, ImGui draw-list) ------------------------
-struct Camera3D { float yaw = 0.7f, pitch = 0.5f, dist = 70.0f; };
+struct Camera3D {
+    float yaw = 0.7f, pitch = 0.5f, dist = 70.0f;
+    float cx = 0, cy = 0, cz = 0;   // look-at center (km rel. player), lerped each frame
+    float tx = 0, ty = 0, tz = 0;   // target center the camera eases toward
+};
 
 // Project a world point (km, target at origin) to screen. False if behind camera.
 static bool project3d(const Camera3D& c, ImVec2 ctr, float focal,
@@ -950,6 +954,9 @@ static void map3d_panel(void)
     static bool follow = false;         // lock the camera yaw to the ship's heading
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     ImGui::Checkbox("follow ship", &follow);
+    ImGui::SameLine();
+    if (ImGui::Button("reset view")) { cam.tx = cam.ty = cam.tz = 0; }  // ease back to the ship
+    ImGui::SameLine(); ImGui::TextDisabled("dbl-click focus · MMB pan");
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 64.0f || avail.y < 64.0f) { ImGui::End(); return; }
@@ -959,13 +966,32 @@ static void map3d_panel(void)
     float  focal = avail.y * 0.5f / tanf(0.45f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    ImGui::InvisibleButton("canvas3d", avail);
+    ImGui::InvisibleButton("canvas3d", avail,
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
     bool hov = ImGui::IsItemHovered();
-    if (ImGui::IsItemActive()) {                       // left-drag orbits (pitch only in follow)
+    if (ImGui::IsItemActive()) {
         ImVec2 d = ImGui::GetIO().MouseDelta;
-        if (!follow) cam.yaw -= d.x * 0.008f;
-        cam.pitch += d.y * 0.008f;
-        cam.pitch = cam.pitch >  1.50f ?  1.50f : (cam.pitch < -1.50f ? -1.50f : cam.pitch);
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+            // MMB pan: slide the look-at center across the camera's right/up plane.
+            float cp = cosf(cam.pitch), sp = sinf(cam.pitch);
+            float cyw = cosf(cam.yaw), syw = sinf(cam.yaw);
+            float fx = -cp*syw, fy = -sp, fz = -cp*cyw;        // forward (eye->target)
+            float rx = -fz, rz = fx, rl = sqrtf(rx*rx + rz*rz);
+            if (rl > 1e-6f) { rx /= rl; rz /= rl; }
+            float ux = -rz*fy, uy = rz*fx - rx*fz, uz = rx*fy;  // up = cross(right, fwd)
+            float sc = cam.dist / focal;                        // ~world units per pixel
+            cam.tx += (-d.x*rx + d.y*ux) * sc;
+            cam.ty += ( d.y*uy) * sc;
+            cam.tz += (-d.x*rz + d.y*uz) * sc;
+            cam.cx = cam.tx; cam.cy = cam.ty; cam.cz = cam.tz;  // no lerp lag while panning
+        } else if (!follow) {                                   // left-drag orbits
+            cam.yaw -= d.x * 0.008f;
+            cam.pitch += d.y * 0.008f;
+            cam.pitch = cam.pitch > 1.50f ? 1.50f : (cam.pitch < -1.50f ? -1.50f : cam.pitch);
+        } else {
+            cam.pitch += d.y * 0.008f;                          // follow: pitch only
+            cam.pitch = cam.pitch > 1.50f ? 1.50f : (cam.pitch < -1.50f ? -1.50f : cam.pitch);
+        }
     }
     // Follow mode: lock the orbit yaw to the ship's heading so its nose points "into"
     // the view (heading from the forward vector's X/Z; flip the sign to taste).
@@ -976,6 +1002,13 @@ static void map3d_panel(void)
         if (wh != 0.0f) cam.dist *= powf(0.85f, wh);
         cam.dist = cam.dist < 3.0f ? 3.0f : (cam.dist > 600.0f ? 600.0f : cam.dist);
     }
+    // Ease the look-at center toward its target (frame-rate independent lerp).
+    {
+        float lf = 1.0f - powf(0.0025f, ImGui::GetIO().DeltaTime);
+        cam.cx += (cam.tx - cam.cx) * lf;
+        cam.cy += (cam.ty - cam.cy) * lf;
+        cam.cz += (cam.tz - cam.cz) * lf;
+    }
 
     dl->PushClipRect(p0, p1, true);
     dl->AddRectFilled(p0, p1, IM_COL32(7, 9, 16, 255));
@@ -984,16 +1017,18 @@ static void map3d_panel(void)
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
     auto KY = [&](int32_t a){ return (a - view.player_y) / U; };
     auto KZ = [&](int32_t a){ return (a - view.player_z) / U; };
+    // Project a world km-point relative to the (lerped) look-at center.
+    auto PROJ = [&](float wx, float wy, float wz, ImVec2& s, float& d) {
+        return project3d(cam, ctr, focal, wx - cam.cx, wy - cam.cy, wz - cam.cz, s, d);
+    };
 
     // ecliptic grid on y=0
     {
         const float G = 40.0f, step = 10.0f; ImU32 gc = IM_COL32(40, 70, 110, 90);
         for (float g = -G; g <= G + 0.1f; g += step) {
             ImVec2 a, b; float d;
-            if (project3d(cam, ctr, focal, g, 0, -G, a, d) &&
-                project3d(cam, ctr, focal, g, 0,  G, b, d)) dl->AddLine(a, b, gc, 1.0f);
-            if (project3d(cam, ctr, focal, -G, 0, g, a, d) &&
-                project3d(cam, ctr, focal,  G, 0, g, b, d)) dl->AddLine(a, b, gc, 1.0f);
+            if (PROJ(g, 0, -G, a, d) && PROJ(g, 0,  G, b, d)) dl->AddLine(a, b, gc, 1.0f);
+            if (PROJ(-G, 0, g, a, d) && PROJ( G, 0, g, b, d)) dl->AddLine(a, b, gc, 1.0f);
         }
     }
     // scanner-range ring on the plane
@@ -1002,7 +1037,7 @@ static void map3d_panel(void)
         ImVec2 prev; bool has = false; float d;
         for (int i = 0; i <= 48; ++i) {
             float a = (float)i / 48.0f * 6.2831853f; ImVec2 s;
-            if (project3d(cam, ctr, focal, r*cosf(a), 0, r*sinf(a), s, d)) {
+            if (PROJ(r*cosf(a), 0, r*sinf(a), s, d)) {
                 if (has) dl->AddLine(prev, s, IM_COL32(70, 180, 200, 130), 1.5f);
                 prev = s; has = true;
             } else has = false;
@@ -1015,9 +1050,9 @@ static void map3d_panel(void)
     for (const auto& o : view.objects) {
         if (!obj_passes_filter(o.type, map3d_filter)) continue;
         ImVec2 s; float d;
-        if (!project3d(cam, ctr, focal, KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
+        if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; float gd;
-        e.gok = project3d(cam, ctr, focal, KX(o.x), 0, KZ(o.z), e.ground, gd);
+        e.gok = PROJ(KX(o.x), 0, KZ(o.z), e.ground, gd);
         ps.push_back(e);
     }
     std::sort(ps.begin(), ps.end(), [](const PObj& a, const PObj& b){ return a.depth > b.depth; });
@@ -1046,7 +1081,7 @@ static void map3d_panel(void)
     // player marker at origin
     {
         ImVec2 s; float d;
-        if (project3d(cam, ctr, focal, 0, 0, 0, s, d)) {
+        if (PROJ(0, 0, 0, s, d)) {
             dl->AddCircleFilled(s, 5.0f, IM_COL32(120, 255, 160, 255));
             dl->AddCircle(s, 8.0f, IM_COL32(120, 255, 160, 160), 0, 1.5f);
             dl->AddText(ImVec2(s.x + 10, s.y - 6), IM_COL32(150, 255, 180, 230), "YOU");
@@ -1078,6 +1113,11 @@ static void map3d_panel(void)
                 ImVec2 dd = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
                 if (fabsf(dd.x) + fabsf(dd.y) < 4.0f) select_target(*best);
             }
+            // Double-click eases the camera to focus on the object.
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                cam.tx = KX(best->x); cam.ty = KY(best->y); cam.tz = KZ(best->z);
+                select_target(*best);
+            }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 ctx_obj = *best; ctx_have = true; ImGui::OpenPopup("obj3d_ctx");
             }
@@ -1107,11 +1147,6 @@ static void map3d_panel(void)
 
 static void overlay_draw(void)
 {
-    // Service any pending debug-socket command here, on the main thread, so its
-    // memory walk is synchronized with the game (the server thread no longer
-    // touches game memory itself — that race used to crash the game).
-    x3::debug_server_pump();
-
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -1186,6 +1221,11 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
         mem_open();                                 // open /proc/self/mem for reads
         x3::start_debug_server(make_engine_mem());  // localhost:7373, read-only
     }
+
+    // Service the debug socket every frame on the main thread — even when the
+    // overlay is hidden — so socket queries don't hang while ScrollLock is off.
+    if (g_inited)
+        x3::debug_server_pump();
 
     if (g_inited && g_ui_visible)
         overlay_draw();
