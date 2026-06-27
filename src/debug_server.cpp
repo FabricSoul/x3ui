@@ -107,6 +107,24 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         return b;
     }
 
+    if (op == "wire") {   // diagnose the mesh wireframe chain:  wire <obj_addr>
+        std::string at; is >> at;
+        uint32_t a = parse_addr(at), id = 0;
+        u32(a + 0x12c, id);
+        uint32_t model = mem.model ? mem.model(id) : 0;
+        uint32_t lodarr = 0, lodcnt = 0, mesh = 0, vcount = 0, verts = 0;
+        if (model) { u32(model + 0xc, lodarr); u32(model + 0x10, lodcnt); lodcnt &= 0xFFFF; }
+        if (lodarr && lodcnt) u32(lodarr + (lodcnt - 1) * 4, mesh);
+        if (mesh) { u32(mesh + 0x0, vcount); u32(mesh + 0x8, verts); }
+        MeshWire w = read_mesh_wireframe(mem, a);
+        snprintf(b, sizeof b,
+                 "ok addr=0x%x id=%d model=0x%x lodarr=0x%x lodcnt=%d mesh=0x%x vcount=%d verts=0x%x "
+                 "| wire.ok=%d v=%zu tris=%zu",
+                 a, (int)id, model, lodarr, lodcnt, mesh, vcount, verts,
+                 (int)w.ok, w.vcount(), w.edges.size() / 6);
+        return b;
+    }
+
     if (op == "text") {   // resolve a {page,id} text ref:  text <page> <id>
         uint32_t page = 0, id = 0;
         is >> page >> id;
