@@ -151,13 +151,18 @@ static void test_visibility_filter() {
     fm.w(0x2000 + 0x50, 0x3000);
     fm.w(0x3000 + 0x00, 0x4000);     // head -> node1
     // node1: visible ship
-    fm.w(0x4000 + 0x00, 0x5000);
+    fm.w(0x4000 + 0x00, 0x4800);
     fm.w(0x4000 + 0x48, 7);
     fm.w(0x4000 + 0x0c, 0x9100);  fm.s(0x9100, "Visible Ship");
-    // node2: hidden via +0x40 bit4 (0x10)
+    // node1b: visible ship WITH +0x40 bit4 (0x10) — normal-ship flag, must show
+    fm.w(0x4800 + 0x00, 0x5000);
+    fm.w(0x4800 + 0x48, 7);
+    fm.w(0x4800 + 0x40, 0x10);
+    fm.w(0x4800 + 0x0c, 0x9150);  fm.s(0x9150, "Bit4 Ship");
+    // node2: hidden via +0x40 bit0 (0x1) — internal / non-contact (ware/cargo)
     fm.w(0x5000 + 0x00, 0x6000);
-    fm.w(0x5000 + 0x48, 7);
-    fm.w(0x5000 + 0x40, 0x10);
+    fm.w(0x5000 + 0x48, 9);
+    fm.w(0x5000 + 0x40, 0x1);
     fm.w(0x5000 + 0x0c, 0x9200);  fm.s(0x9200, "Hidden A");
     // node3: hidden via +0x44 bit29 (0x20000000)
     fm.w(0x6000 + 0x00, 0x7000);     // -> node4
@@ -171,8 +176,7 @@ static void test_visibility_filter() {
     fm.w(0x7000 + 0x0c, 0x9400);  fm.s(0x9400, "Hidden C");
 
     auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
-    CHECK_EQ(v.objects.size(), (size_t)1);
-    CHECK_STR(v.objects[0].name.c_str(), "Visible Ship");
+    CHECK_EQ(v.objects.size(), (size_t)2);   // Visible Ship + Bit4 Ship; bit0 + f44 hidden
 }
 
 // Scanner-range gate: a ship beyond the player's scanner range is dropped; one
@@ -287,6 +291,44 @@ static void test_name_brace_expand() {
     CHECK_STR(objs[0].name.c_str(), "Swarm Missile Production Complex alpha");
 }
 
+// A tiny model (3 verts, 1 triangle) read through the model cache + LOD mesh.
+static void test_mesh_wireframe() {
+    FakeMem fm;
+    fm.w(0x082a0640, 0x1000);          // g_world_root pointer -> world struct
+    fm.w(0x1000 + 0x14, 0x2000);       // model cache hashmap
+    fm.w(0x2000 + 0, 0x3000);          // buckets
+    fm.w(0x2000 + 4, 4);               // bucket count
+    uint32_t obj = 0x5000;
+    fm.w(obj + 0x12c, 10);             // model id
+    fm.w(obj + 0x138, 0);              // lod index
+    fm.w(0x3000 + ((4 - 1) & 11) * 4, 0x4000);  // bucket[(count-1)&(id+1)] -> node
+    fm.w(0x4000 + 4, 11);              // node.key = id+1
+    fm.w(0x4000 + 8, 0x6000);          // node.model
+    fm.w(0x6000 + 0xc, 0x7000);        // model.lodarr
+    fm.w(0x6000 + 0x10, 2);            // model.lodcount
+    fm.w(0x7000 + 1 * 4, 0x8000);      // lod[coarsest=1] -> mesh
+    fm.w(0x8000 + 0, 3);               // vcount
+    fm.w(0x8000 + 8, 0x9000);          // verts
+    fm.w(0x8000 + 4, 1);               // part count
+    fm.w(0x8000 + 0x10, 0xA000);       // parts
+    fm.w(0x9000 + 0, 0x00004000); fm.w(0x9000 + 4, 0);          // v0 = (1,0,0)
+    fm.w(0x9018 + 0, 0x40000000); fm.w(0x9018 + 4, 0);          // v1 = (0,1,0)
+    fm.w(0x9030 + 0, 0);          fm.w(0x9030 + 4, 0x00004000); // v2 = (0,0,1)
+    fm.w(0xA000 + 0, 0xB000);          // part[0]
+    fm.w(0xB000 + 0, 1);               // group count
+    fm.w(0xB000 + 4, 0xC000);          // groups
+    fm.w(0xC000 + 0, 1);               // triangle count
+    fm.w(0xC000 + 4, 0xD000);          // triangles
+    fm.w(0xD000 + 0, 0); fm.w(0xD000 + 4, 1); fm.w(0xD000 + 8, 2);  // tri (0,1,2)
+
+    auto w = x3::read_mesh_wireframe(fm.mem(), obj);
+    CHECK(w.ok);
+    CHECK_EQ(w.vcount(), (size_t)3);
+    CHECK_EQ(w.edges.size(), (size_t)6);          // 3 edges * 2 indices
+    CHECK(w.verts[0] > 0.99f && w.verts[0] < 1.01f);   // v0.x = 16384/16384 = 1.0
+    CHECK(w.verts[4] > 0.99f && w.verts[4] < 1.01f);   // v1.y = 1.0
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
@@ -295,6 +337,7 @@ int main() {
     RUN(test_iff_relation);
     RUN(test_text_db_resolve);
     RUN(test_name_brace_expand);
+    RUN(test_mesh_wireframe);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);

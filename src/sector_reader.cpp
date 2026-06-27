@@ -19,6 +19,87 @@ std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id) {
     return mem.text ? mem.text(page, id) : std::string();
 }
 
+// Look up a model pointer by id via the engine's resident model cache (a hashmap
+// at *( *(0x082a0640) + 0x14 ), keyed by id+1). All reads via mem; 0 if not found.
+static uint32_t model_cache_lookup(const Mem& mem, uint32_t id) {
+    uint32_t world = 0, hashmap = 0, buckets = 0, count = 0, node = 0;
+    if (!ru32(mem, 0x082a0640u, world) || !world) return 0;
+    if (!ru32(mem, world + 0x14, hashmap) || !hashmap) return 0;
+    if (!ru32(mem, hashmap, buckets) || !buckets) return 0;
+    if (!ru32(mem, hashmap + 4, count) || !count) return 0;
+    uint32_t key = id + 1;
+    if (!ru32(mem, buckets + ((count - 1) & key) * 4, node)) return 0;
+    for (int g = 0; node && g < 1024; ++g) {
+        uint32_t k = 0;
+        if (!ru32(mem, node + 4, k)) break;
+        if (k == key) { uint32_t m = 0; ru32(mem, node + 8, m); return m; }
+        if (!ru32(mem, node, node)) break;
+    }
+    return 0;
+}
+
+MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj, bool coarsest,
+                             size_t vcap, size_t ecap) {
+    MeshWire w;
+    uint32_t id = 0;
+    if (!ru32(mem, obj + 0x12c, id) || (int32_t)id < 0) return w;
+    uint32_t model = model_cache_lookup(mem, id);
+    if (!model) return w;
+
+    // mesh = *( *(model+0xc)[lod] ), lod from obj+0x138 (or the coarsest LOD).
+    uint32_t lodarr = 0, lodcnt = 0, lod = 0;
+    if (!ru32(mem, model + 0xc, lodarr) || !lodarr) return w;
+    ru32(mem, model + 0x10, lodcnt); lodcnt &= 0xFFFF;
+    if (!ru32(mem, obj + 0x138, lod)) lod = 0;
+    if (coarsest && lodcnt) lod = lodcnt - 1;
+    else if (lodcnt && lod >= lodcnt) lod = lodcnt - 1;
+    uint32_t mesh = 0;
+    if (!ru32(mem, lodarr + lod * 4, mesh) || !mesh) return w;
+
+    uint32_t vcount = 0, verts = 0;
+    if (!ru32(mem, mesh + 0x0, vcount) || !vcount || vcount > vcap) return w;
+    if (!ru32(mem, mesh + 0x8, verts) || !verts) return w;
+    w.verts.reserve(vcount * 3);
+    for (uint32_t i = 0; i < vcount; ++i) {
+        uint32_t a = 0, b = 0;
+        if (!ru32(mem, verts + i * 0x18 + 0, a) || !ru32(mem, verts + i * 0x18 + 4, b)) {
+            w.verts.clear(); return w;
+        }
+        int16_t x = (int16_t)(a & 0xFFFF), y = (int16_t)(a >> 16), z = (int16_t)(b & 0xFFFF);
+        w.verts.push_back(x / 16384.0f);
+        w.verts.push_back(y / 16384.0f);
+        w.verts.push_back(z / 16384.0f);
+    }
+
+    // triangle edges: mesh part list -> material groups -> triangles (v0,v1,v2).
+    uint32_t pcw = 0, parts = 0;
+    ru32(mem, mesh + 0x4, pcw); int pcount = (int16_t)(pcw & 0xFFFF);
+    ru32(mem, mesh + 0x10, parts);
+    auto add_edge = [&](uint32_t i0, uint32_t i1) {
+        if (i0 < vcount && i1 < vcount) { w.edges.push_back(i0); w.edges.push_back(i1); }
+    };
+    for (int p = 0; p < pcount && parts && w.edges.size() < ecap * 2; ++p) {
+        uint32_t part = 0;
+        if (!ru32(mem, parts + p * 4, part) || !part) continue;
+        uint32_t gcw = 0, groups = 0;
+        ru32(mem, part + 0x0, gcw); int gcount = (int16_t)(gcw & 0xFFFF);
+        ru32(mem, part + 0x4, groups);
+        for (int gi = 0; gi < gcount && groups && w.edges.size() < ecap * 2; ++gi) {
+            uint32_t grp = groups + (uint32_t)gi * 0x20;
+            uint32_t tcount = 0, tris = 0;
+            ru32(mem, grp + 0x0, tcount); ru32(mem, grp + 0x4, tris);
+            if (!tris || tcount > ecap) continue;
+            for (uint32_t t = 0; t < tcount && w.edges.size() < ecap * 2; ++t) {
+                uint32_t tri = tris + t * 0x10, v0 = 0, v1 = 0, v2 = 0;
+                if (!ru32(mem, tri + 0, v0) || !ru32(mem, tri + 4, v1) || !ru32(mem, tri + 8, v2)) break;
+                add_edge(v0, v1); add_edge(v1, v2); add_edge(v2, v0);
+            }
+        }
+    }
+    w.ok = !w.verts.empty();
+    return w;
+}
+
 // Replace each "{page, id}" token in a name with its resolved text. Tokens that
 // don't resolve are left literal (so this never makes a name worse). The engine's
 // own expander skips these when there's a space after the comma, which is why the
@@ -106,7 +187,10 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
 
         // Visibility gate — replicate the game's gravidar / sector-map filter so
         // we show the player-visible subset, not the engine's omniscient list:
-        //   hide if (+0x40 & 0x11)        internal sub-part / non-contact flag
+        //   hide if (+0x40 & 0x1)         internal / non-contact (suns, planets,
+        //                                 wares/cargo). NOTE: bit4 (0x10) is set on
+        //                                 ~60% of normal ships (incl. visible pirate
+        //                                 wings) and must NOT hide them.
         //   hide if (+0x44 & 0x28000000)  bit29: camera/debris/wreck/nav-special;
         //                                 bit27: internal/despawn (the *** UNDEFINED ***
         //                                 type-20 objects the in-game map also drops)
@@ -114,7 +198,7 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
         uint32_t f40 = 0, f44 = 0;
         ru32(mem, node + off::OBJ_FLAGS,  f40);
         ru32(mem, node + off::OBJ_FLAGS2, f44);
-        bool hidden = (f40 & 0x11u) || (f44 & 0x28000000u);
+        bool hidden = (f40 & 0x1u) || (f44 & 0x28000000u);
 
         if (!hidden) {
             ObjInfo o;

@@ -34,6 +34,9 @@ struct Mem {
     // Resolve a {textPage, textID} reference to its string (the engine does the
     // lookup + marker expansion). "" if unset/unavailable. Optional.
     std::function<std::string(uint32_t page, uint32_t id)> text;
+    // Resolve a model id (obj+0x12c) to the resident model struct pointer. 0 if
+    // unavailable. Optional (used only by read_mesh_wireframe).
+    std::function<uint32_t(uint32_t model_id)> model;
 };
 
 struct SectorView {
@@ -81,5 +84,21 @@ const char* type_label(int16_t type);
 // Resolve a {textPage, textID} reference to its string via the engine text DB.
 // Returns "" if unavailable. Used to fix object names that show as "{17, 6651}".
 std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id);
+
+// A wireframe mesh read from the engine's resident CPU model data (no GPU, no
+// engine calls). Vertices are model-local units; edges index into them.
+struct MeshWire {
+    std::vector<float>    verts;   // flat x,y,z triples (model-local units)
+    std::vector<uint32_t> edges;   // flat index pairs into verts (i0,i1,i0,i1,...)
+    bool ok = false;
+    size_t vcount() const { return verts.size() / 3; }
+};
+
+// Read an object's wireframe by walking model id (obj+0x12c) -> model cache ->
+// LOD mesh -> int16 vertex array (/16384) + triangle list -> triangle edges.
+// `coarsest` picks the lowest-detail LOD (cheaper wireframe). Bounded + all reads
+// go through `mem` (pread), so a stale pointer yields {ok=false}, never a crash.
+MeshWire read_mesh_wireframe(const Mem& mem, uint32_t obj_addr, bool coarsest = true,
+                             size_t vcap = 60000, size_t ecap = 200000);
 
 } // namespace x3

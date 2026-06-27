@@ -707,20 +707,22 @@ static x3::Mem make_engine_mem(void)
     return m;
 }
 
-// EVE-overview object filter. The table and the 3D map each keep their own
-// selection (they're independent views).
-enum MapFilter { MF_ALL = 0, MF_SHIPS, MF_STATIONS, MF_GATES, MF_ASTEROIDS, MF_OTHER };
+// In-game-overview object filter: ships split by IFF relation (own/friend/neutral/
+// enemy) + station/gate/asteroid by type. The table and the 3D map each keep their
+// own selection (they're independent views).
+enum MapFilter { MF_ALL = 0, MF_OWN, MF_FRIEND, MF_NEUTRAL, MF_ENEMY,
+                 MF_STATIONS, MF_GATES, MF_ASTEROIDS };
 
-static bool obj_passes_filter(int16_t t, int f)
+static bool obj_passes_filter(const x3::ObjInfo& o, int f)
 {
     switch (f) {
-        case MF_SHIPS:     return t == x3::off::TYPE_SHIP;
-        case MF_STATIONS:  return t == x3::off::TYPE_STATION || t == x3::off::TYPE_FACTORY;
-        case MF_GATES:     return t == x3::off::TYPE_GATE;
-        case MF_ASTEROIDS: return t == x3::off::TYPE_ASTEROID;
-        case MF_OTHER:     return !(t == x3::off::TYPE_SHIP || t == x3::off::TYPE_STATION ||
-                                    t == x3::off::TYPE_FACTORY || t == x3::off::TYPE_GATE ||
-                                    t == x3::off::TYPE_ASTEROID);
+        case MF_OWN:       return o.relation == x3::REL_OWN;
+        case MF_FRIEND:    return o.relation == x3::REL_FRIEND;
+        case MF_NEUTRAL:   return o.relation == x3::REL_NEUTRAL;
+        case MF_ENEMY:     return o.relation == x3::REL_ENEMY;
+        case MF_STATIONS:  return o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY;
+        case MF_GATES:     return o.type == x3::off::TYPE_GATE;
+        case MF_ASTEROIDS: return o.type == x3::off::TYPE_ASTEROID;
         default:           return true;   // MF_ALL
     }
 }
@@ -728,11 +730,13 @@ static bool obj_passes_filter(int16_t t, int f)
 static void map_filter_bar(int* filter)
 {
     ImGui::RadioButton("all", filter, MF_ALL);            ImGui::SameLine();
-    ImGui::RadioButton("ships", filter, MF_SHIPS);       ImGui::SameLine();
+    ImGui::RadioButton("own", filter, MF_OWN);           ImGui::SameLine();
+    ImGui::RadioButton("friend", filter, MF_FRIEND);     ImGui::SameLine();
+    ImGui::RadioButton("neutral", filter, MF_NEUTRAL);   ImGui::SameLine();
+    ImGui::RadioButton("enemy", filter, MF_ENEMY);       ImGui::SameLine();
     ImGui::RadioButton("stations", filter, MF_STATIONS); ImGui::SameLine();
     ImGui::RadioButton("gates", filter, MF_GATES);       ImGui::SameLine();
-    ImGui::RadioButton("roids", filter, MF_ASTEROIDS);   ImGui::SameLine();
-    ImGui::RadioButton("other", filter, MF_OTHER);
+    ImGui::RadioButton("roids", filter, MF_ASTEROIDS);
 }
 
 static ImU32       faction_color(const x3::ObjInfo& o);   // defined with the 3D map
@@ -791,7 +795,7 @@ static void map_panel(void)
     static int table_filter = MF_ALL;
     map_filter_bar(&table_filter);
     int shown = 0;
-    for (const auto& o : view.objects) if (obj_passes_filter(o.type, table_filter)) ++shown;
+    for (const auto& o : view.objects) if (obj_passes_filter(o, table_filter)) ++shown;
     ImGui::SameLine(); ImGui::TextDisabled("|  showing %d", shown);
 
     // Sortable, with a sticky header and a right-click-header column show/hide menu
@@ -814,7 +818,7 @@ static void map_panel(void)
         static std::vector<const x3::ObjInfo*> rows;
         rows.clear();
         for (const auto& o : view.objects)
-            if (obj_passes_filter(o.type, table_filter)) rows.push_back(&o);
+            if (obj_passes_filter(o, table_filter)) rows.push_back(&o);
         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
             if (ss->SpecsCount > 0) {
                 const ImGuiTableColumnSortSpecs& sp = ss->Specs[0];
@@ -1092,7 +1096,7 @@ static void map3d_panel(void)
     struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
     std::vector<PObj> ps; ps.reserve(view.objects.size());
     for (const auto& o : view.objects) {
-        if (!obj_passes_filter(o.type, map3d_filter)) continue;
+        if (!obj_passes_filter(o, map3d_filter)) continue;
         ImVec2 s; float d;
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; float gd;
