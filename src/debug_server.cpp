@@ -80,6 +80,14 @@ std::string handle_request(const Mem &mem, const std::string &line) {
 
     if (op == "ping") return "pong";
 
+    if (op == "text") {   // resolve a {page,id} text ref:  text <page> <id>
+        uint32_t page = 0, id = 0;
+        is >> page >> id;
+        std::string s = resolve_text(mem, page, id);
+        snprintf(b, sizeof b, "ok page=%u id=%u \"%s\"", page, id, s.c_str());
+        return b;
+    }
+
     if (op == "rss") {   // in-process memory, for leak watching
         long vmrss = -1, vmsize = -1;
         FILE *fp = fopen("/proc/self/status", "r");

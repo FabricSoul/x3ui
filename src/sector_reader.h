@@ -75,4 +75,8 @@ SectorView read_current_sector(const Mem& mem,
 // Human label for a type id (+0x48). Returns a static string.
 const char* type_label(int16_t type);
 
+// Resolve a {textPage, textID} reference to its string via the engine text DB.
+// Returns "" if unavailable. Used to fix object names that show as "{17, 6651}".
+std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id);
+
 } // namespace x3

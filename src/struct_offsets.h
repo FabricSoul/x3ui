@@ -64,6 +64,12 @@ constexpr uint32_t TF_FWD_Y = 0x54;
 constexpr uint32_t TF_FWD_Z = 0x64;
 constexpr float    FIXED16  = 65536.0f;
 
+// Text database (resolves {textPage,textID} refs in object names to strings).
+constexpr uint32_t TEXTDB_ROOT     = 0x08308880u; // *: g_text_db_root host
+constexpr uint32_t RENDER_CONFIG   = 0x0829d798u; // *: g_render_config
+constexpr uint32_t CFG_LANG        = 0x708;       // render_config + 0x708 = language index
+constexpr uint32_t TEXTDB_PAGETBL  = 0x334;       // host + 0x334 + lang*4 = page hashtable
+
 // Position units: 1 km = 500000 raw units (object transform x/y/z).
 constexpr float   UNITS_PER_KM  = 500000.0f;
 

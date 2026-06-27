@@ -264,12 +264,54 @@ static void test_iff_relation() {
     CHECK_EQ((int)objs[3].relation, (int)x3::REL_OWN);
 }
 
+// Build a minimal text DB in FakeMem: page 17 has ids {100->"Alpha",
+// 6651->"Trading Station", 9000->"Omega"} (entries sorted by id, 12-byte stride).
+static void seed_text_db(FakeMem& fm) {
+    fm.w(0x08308880, 0x10000);              // g_text_db_root
+    fm.w(0x0829d798, 0x20000);              // g_render_config
+    fm.w(0x20000 + 0x708, 0);               // language index 0
+    fm.w(0x10000 + 0x334 + 0, 0x30000);     // page hashtable for lang 0
+    fm.w(0x30000 + 0, 0x40000);             // buckets
+    fm.w(0x30000 + 4, 4);                   // nbuck = 4
+    fm.w(0x40000 + ((4 - 1) & 17) * 4, 0x50000);
+    fm.w(0x50000 + 4, 17);                  // node.pageID = 17
+    fm.w(0x50000 + 8, 0x60000);             // node.pageObj
+    fm.w(0x60000 + 0, 3);                   // entry count
+    fm.w(0x60000 + 4, 0x70000);             // entry array
+    fm.w(0x70000 + 0, 100);  fm.w(0x70000 + 4, 0x80000); fm.s(0x80000, "Alpha");
+    fm.w(0x7000c + 0, 6651); fm.w(0x7000c + 4, 0x80100); fm.s(0x80100, "Trading Station");
+    fm.w(0x70018 + 0, 9000); fm.w(0x70018 + 4, 0x80200); fm.s(0x80200, "Omega");
+}
+
+static void test_text_db_resolve() {
+    FakeMem fm; seed_text_db(fm);
+    CHECK_STR(x3::resolve_text(fm.mem(), 17, 6651).c_str(), "Trading Station");
+    CHECK_STR(x3::resolve_text(fm.mem(), 17, 100).c_str(), "Alpha");
+    CHECK_STR(x3::resolve_text(fm.mem(), 17, 9000).c_str(), "Omega");
+    CHECK(x3::resolve_text(fm.mem(), 17, 9999).empty());   // not found
+    CHECK(x3::resolve_text(fm.mem(), 99, 6651).empty());   // wrong page
+}
+
+// A station named "{17, 6651}" (space after comma -> engine leaves it raw) gets
+// resolved to "Trading Station" via the text DB.
+static void test_name_brace_expand() {
+    FakeMem fm; seed_text_db(fm);
+    fm.w(0x2000 + 0x50, 0x3000);   fm.w(0x3000, 0x4000);
+    fm.w(0x4000, 0x3004);          fm.w(0x4000 + 0x48, 5);
+    fm.w(0x4000 + 0x0c, 0x9000);   fm.s(0x9000, "{17, 6651}");
+    auto objs = x3::read_sector_objects(fm.mem(), 0x2000);
+    CHECK_EQ(objs.size(), (size_t)1);
+    CHECK_STR(objs[0].name.c_str(), "Trading Station");
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
     RUN(test_scanner_range_filter);
     RUN(test_gate_dest_name);
     RUN(test_iff_relation);
+    RUN(test_text_db_resolve);
+    RUN(test_name_brace_expand);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);
