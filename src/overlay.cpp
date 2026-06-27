@@ -718,36 +718,50 @@ static x3::Mem make_engine_mem(void)
     return m;
 }
 
-// In-game-overview object filter: ships split by IFF relation (own/friend/neutral/
-// enemy) + station/gate/asteroid by type. The table and the 3D map each keep their
-// own selection (they're independent views).
-enum MapFilter { MF_ALL = 0, MF_OWN, MF_FRIEND, MF_NEUTRAL, MF_ENEMY,
-                 MF_STATIONS, MF_GATES, MF_ASTEROIDS };
+// Two independent filter layers (multi-select): a relation layer (own/friend/
+// neutral/enemy) and a type layer (ships/stations/gates/roids). An object shows if
+// it matches ANY checked relation OR ANY checked type; nothing checked = show all.
+// The table and the 3D map each keep their own selection.
+enum RelBit  { RB_OWN = 1, RB_FRIEND = 2, RB_NEUTRAL = 4, RB_ENEMY = 8 };
+enum TypeBit { TB_SHIP = 1, TB_STATION = 2, TB_GATE = 4, TB_ROID = 8 };
 
-static bool obj_passes_filter(const x3::ObjInfo& o, int f)
+static int rel_bit(int8_t r)
 {
-    switch (f) {
-        case MF_OWN:       return o.relation == x3::REL_OWN;
-        case MF_FRIEND:    return o.relation == x3::REL_FRIEND;
-        case MF_NEUTRAL:   return o.relation == x3::REL_NEUTRAL;
-        case MF_ENEMY:     return o.relation == x3::REL_ENEMY;
-        case MF_STATIONS:  return o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY;
-        case MF_GATES:     return o.type == x3::off::TYPE_GATE;
-        case MF_ASTEROIDS: return o.type == x3::off::TYPE_ASTEROID;
-        default:           return true;   // MF_ALL
+    switch (r) {
+        case x3::REL_OWN:     return RB_OWN;
+        case x3::REL_FRIEND:  return RB_FRIEND;
+        case x3::REL_NEUTRAL: return RB_NEUTRAL;
+        case x3::REL_ENEMY:   return RB_ENEMY;
     }
+    return 0;
+}
+static int type_bit(int16_t t)
+{
+    if (t == x3::off::TYPE_SHIP) return TB_SHIP;
+    if (t == x3::off::TYPE_STATION || t == x3::off::TYPE_FACTORY) return TB_STATION;
+    if (t == x3::off::TYPE_GATE) return TB_GATE;
+    if (t == x3::off::TYPE_ASTEROID) return TB_ROID;
+    return 0;
+}
+static bool obj_passes_filter(const x3::ObjInfo& o, int relmask, int typemask)
+{
+    if (!relmask && !typemask) return true;
+    return (relmask & rel_bit(o.relation)) || (typemask & type_bit(o.type));
 }
 
-static void map_filter_bar(int* filter)
+static void map_filter_bar(int* relmask, int* typemask)
 {
-    ImGui::RadioButton("all", filter, MF_ALL);            ImGui::SameLine();
-    ImGui::RadioButton("own", filter, MF_OWN);           ImGui::SameLine();
-    ImGui::RadioButton("friend", filter, MF_FRIEND);     ImGui::SameLine();
-    ImGui::RadioButton("neutral", filter, MF_NEUTRAL);   ImGui::SameLine();
-    ImGui::RadioButton("enemy", filter, MF_ENEMY);       ImGui::SameLine();
-    ImGui::RadioButton("stations", filter, MF_STATIONS); ImGui::SameLine();
-    ImGui::RadioButton("gates", filter, MF_GATES);       ImGui::SameLine();
-    ImGui::RadioButton("roids", filter, MF_ASTEROIDS);
+    ImGui::TextDisabled("rel"); ImGui::SameLine();
+    ImGui::CheckboxFlags("own", relmask, RB_OWN);            ImGui::SameLine();
+    ImGui::CheckboxFlags("friend", relmask, RB_FRIEND);      ImGui::SameLine();
+    ImGui::CheckboxFlags("neutral", relmask, RB_NEUTRAL);    ImGui::SameLine();
+    ImGui::CheckboxFlags("enemy", relmask, RB_ENEMY);        ImGui::SameLine();
+    ImGui::TextDisabled(" type"); ImGui::SameLine();
+    ImGui::CheckboxFlags("ships", typemask, TB_SHIP);        ImGui::SameLine();
+    ImGui::CheckboxFlags("stations", typemask, TB_STATION);  ImGui::SameLine();
+    ImGui::CheckboxFlags("gates", typemask, TB_GATE);        ImGui::SameLine();
+    ImGui::CheckboxFlags("roids", typemask, TB_ROID);        ImGui::SameLine();
+    if (ImGui::SmallButton("all")) { *relmask = 0; *typemask = 0; }
 }
 
 static ImU32       faction_color(const x3::ObjInfo& o);   // defined with the 3D map
@@ -803,10 +817,10 @@ static void map_panel(void)
                 view.scanner_range / x3::off::UNITS_PER_KM);
 
     // EVE-overview filter (independent of the 3D map's filter).
-    static int table_filter = MF_ALL;
-    map_filter_bar(&table_filter);
+    static int table_rel = 0, table_type = 0;
+    map_filter_bar(&table_rel, &table_type);
     int shown = 0;
-    for (const auto& o : view.objects) if (obj_passes_filter(o, table_filter)) ++shown;
+    for (const auto& o : view.objects) if (obj_passes_filter(o, table_rel, table_type)) ++shown;
     ImGui::SameLine(); ImGui::TextDisabled("|  showing %d", shown);
 
     // Sortable, with a sticky header and a right-click-header column show/hide menu
@@ -829,7 +843,7 @@ static void map_panel(void)
         static std::vector<const x3::ObjInfo*> rows;
         rows.clear();
         for (const auto& o : view.objects)
-            if (obj_passes_filter(o, table_filter)) rows.push_back(&o);
+            if (obj_passes_filter(o, table_rel, table_type)) rows.push_back(&o);
         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
             if (ss->SpecsCount > 0) {
                 const ImGuiTableColumnSortSpecs& sp = ss->Specs[0];
@@ -986,8 +1000,8 @@ static void map3d_panel(void)
 
     static Camera3D cam;
 
-    static int map3d_filter = MF_ALL;   // independent of the table's filter
-    map_filter_bar(&map3d_filter);
+    static int map3d_rel = 0, map3d_type = 0;   // independent of the table's filter
+    map_filter_bar(&map3d_rel, &map3d_type);
     static bool follow = false;         // lock the camera yaw to the ship's heading
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     ImGui::Checkbox("follow ship", &follow);
@@ -1107,7 +1121,7 @@ static void map3d_panel(void)
     struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
     std::vector<PObj> ps; ps.reserve(view.objects.size());
     for (const auto& o : view.objects) {
-        if (!obj_passes_filter(o, map3d_filter)) continue;
+        if (!obj_passes_filter(o, map3d_rel, map3d_type)) continue;
         ImVec2 s; float d;
         if (!PROJ(KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
         PObj e; e.depth = d; e.s = s; e.o = &o; float gd;

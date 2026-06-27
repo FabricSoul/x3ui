@@ -59,7 +59,7 @@ struct RangeCtx {
     int32_t  px = 0, py = 0, pz = 0;  // player position (raw units, 500000/km)
     int64_t  range = 0;               // scanner range (raw units)
     int16_t  player_race  = -1;       // player ship race id (for the IFF relation)
-    uint32_t player_owner = 0;        // player owner id (== own assets); 0 = unknown
+    uint32_t player_ship  = 0;        // the player's own ship address (== REL_OWN)
 };
 
 // Convenience alias to the scene-global address (aliases the single source of

@@ -217,13 +217,12 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
             bool has_iff = (o.type == off::TYPE_SHIP || o.type == off::TYPE_STATION ||
                             o.type == off::TYPE_FACTORY) && !(f44 & off::NO_IFF_FLAG);
             if (rc && has_iff) {
-                uint32_t pl = 0;
-                if (ru32(mem, node + off::OBJ_PAYLOAD, pl) && pl) {
-                    uint32_t own = 0;
-                    if (rc->player_owner && ru32(mem, pl + off::PAYLOAD_OWNER, own) &&
-                        own == rc->player_owner) {
-                        o.relation = REL_OWN;
-                    } else if (rc->player_race >= 0 && rc->player_race < 32) {
+                if (rc->player_ship && node == rc->player_ship) {
+                    o.relation = REL_OWN;   // own = the player's own ship (only)
+                } else {
+                    uint32_t pl = 0;
+                    if (ru32(mem, node + off::OBJ_PAYLOAD, pl) && pl &&
+                        rc->player_race >= 0 && rc->player_race < 32) {
                         uint32_t fr = 0, fo = 0, bit = 1u << rc->player_race;
                         ru32(mem, pl + off::REL_FRIEND_MASK, fr);
                         ru32(mem, pl + off::REL_FOE_MASK, fo);
@@ -266,12 +265,11 @@ static RangeCtx resolve_range_ctx(const Mem& mem, uint32_t scene) {
     uint32_t player = 0, ptf = 0, px = 0, py = 0, pz = 0;
     if (!ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, player) || !player) return rc;
 
-    // Player race + owner for the IFF relation (set even if the scanner range below
-    // can't be resolved -> coloring still works without range filtering).
-    uint32_t prace = 0, ppl = 0, pown = 0;
+    // Player race + own ship for the IFF relation (set even if the scanner range
+    // below can't be resolved -> coloring still works without range filtering).
+    uint32_t prace = 0;
+    rc.player_ship = player;
     if (ru32(mem, player + off::OBJ_RACE, prace)) rc.player_race = (int16_t)(prace & 0xFFFF);
-    if (ru32(mem, player + off::OBJ_PAYLOAD, ppl) && ppl &&
-        ru32(mem, ppl + off::PAYLOAD_OWNER, pown)) rc.player_owner = pown;
 
     if (!ru32(mem, player + off::OBJ_TRANSFORM, ptf) || !ptf) return rc;
     if (!ru32(mem, ptf + off::TF_X, px) || !ru32(mem, ptf + off::TF_Y, py) ||

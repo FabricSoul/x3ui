@@ -254,12 +254,12 @@ static void test_iff_relation() {
     fm.w(0x5000 + 0x50, 0x5100); fm.w(0x5100 + 0x4c, 0x2);   // foeMask bit1
     fm.w(0x6000 + 0x00, 0x7000); fm.w(0x6000 + 0x48, 7);
     fm.w(0x6000 + 0x50, 0x6100); fm.w(0x6100 + 0x48, 0x0);   // neither -> neutral
-    fm.w(0x7000 + 0x00, 0x3004); fm.w(0x7000 + 0x48, 7);     // -> sentinel
-    fm.w(0x7000 + 0x50, 0x7100); fm.w(0x7100 + 0x0c, 0x1234);// owner == player owner
+    fm.w(0x7000 + 0x00, 0x3004); fm.w(0x7000 + 0x48, 7);     // -> sentinel (the player's own ship)
+    fm.w(0x7000 + 0x50, 0x7100);
 
     x3::RangeCtx rc;
-    rc.player_race  = 1;             // bit 0x2
-    rc.player_owner = 0x1234;
+    rc.player_race = 1;              // bit 0x2
+    rc.player_ship = 0x7000;         // own = the player's own ship node
     auto objs = x3::read_sector_objects(fm.mem(), 0x2000, 4096, &rc);
     CHECK_EQ(objs.size(), (size_t)4);
     CHECK_EQ((int)objs[0].relation, (int)x3::REL_FRIEND);
