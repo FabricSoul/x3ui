@@ -45,6 +45,10 @@ constexpr int16_t TYPE_WARE     = 9;     // installed equipment/ware (e.g. shiel
 constexpr int16_t TYPE_ASTEROID = 0x11;
 constexpr int16_t TYPE_GATE     = 0x12;
 
+// Gate payload: 7-slot destination-object pointer array (each dest's parent chain
+// leads to the destination sector). gate_payload = *(gate+0x50).
+constexpr uint32_t GATE_DEST_ARRAY = 0x58;
+
 // Position units: 1 km = 500000 raw units (object transform x/y/z).
 constexpr float   UNITS_PER_KM  = 500000.0f;
 

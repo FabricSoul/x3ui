@@ -215,10 +215,34 @@ static void test_scanner_range_filter() {
     CHECK_STR(v.objects[0].name.c_str(), "Near Ship");
 }
 
+// Jump gate shows the destination sector name (gate payload +0x58 dest array ->
+// dest obj -> parent type-1 sector -> name).
+static void test_gate_dest_name() {
+    FakeMem fm;
+    fm.w(0x0837a0d0, 0x1000);
+    fm.w(0x1000 + 0x08, 0x2000);
+    fm.w(0x2000 + 0x48, 1);
+    fm.w(0x2000 + 0x50, 0x3000);
+    fm.w(0x3000 + 0x00, 0x4000);     // head -> gate
+    fm.w(0x4000 + 0x00, 0x3004);     // next -> sentinel
+    fm.w(0x4000 + 0x48, 0x12);       // type = gate
+    fm.w(0x4000 + 0x0c, 0x9000);  fm.s(0x9000, "Gate");
+    fm.w(0x4000 + 0x50, 0x5000);     // gate payload
+    fm.w(0x5000 + 0x58, 0x6000);     // dest array[0] -> dest obj
+    fm.w(0x6000 + 0x54, 0x7000);     // dest obj -> parent
+    fm.w(0x7000 + 0x48, 1);          // parent is a sector
+    fm.w(0x7000 + 0x0c, 0x9100);  fm.s(0x9100, "Argon Prime");
+
+    auto v = x3::read_current_sector(fm.mem(), x3::off_SCENE_GLOBAL);
+    CHECK_EQ(v.objects.size(), (size_t)1);
+    CHECK_STR(v.objects[0].name.c_str(), "-> Argon Prime");
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
     RUN(test_scanner_range_filter);
+    RUN(test_gate_dest_name);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);
     RUN(test_cycle_is_capped);

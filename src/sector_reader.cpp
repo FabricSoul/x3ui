@@ -18,6 +18,34 @@ static int16_t read_type(const Mem& m, uint32_t obj) {
     return (int16_t)(w & 0xFFFF);
 }
 
+// For a jump gate, resolve the name of the sector it leads to: each non-null slot
+// in the gate payload's destination array points at the paired object in the dest
+// sector; its parent chain (+0x54, stepping past a paired gate/station) reaches the
+// type-1 sector whose name is at +0x0c. Returns "" if not resolvable.
+static std::string gate_dest_sector_name(const Mem& mem, uint32_t gate) {
+    uint32_t gdata = 0;
+    if (!ru32(mem, gate + off::OBJ_PAYLOAD, gdata) || !gdata) return "";
+    for (int i = 0; i < 7; ++i) {
+        uint32_t dest = 0;
+        if (!ru32(mem, gdata + off::GATE_DEST_ARRAY + i * 4, dest) || !dest) continue;
+        uint32_t parent = 0;
+        if (!ru32(mem, dest + off::OBJ_PARENT, parent) || !parent) continue;
+        int16_t pt = read_type(mem, parent);
+        if (pt == off::TYPE_STATION || pt == off::TYPE_FACTORY) {  // paired -> step up once
+            uint32_t up = 0;
+            if (ru32(mem, parent + off::OBJ_PARENT, up) && up) { parent = up; pt = read_type(mem, parent); }
+        }
+        if (pt == off::TYPE_SECTOR) {
+            uint32_t np = 0;
+            if (ru32(mem, parent + off::OBJ_NAME, np) && np && mem.cstr) {
+                std::string n = mem.cstr(np, 64);
+                if (!n.empty()) return n;
+            }
+        }
+    }
+    return "";
+}
+
 std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, size_t cap,
                                          const RangeCtx* rc) {
     std::vector<ObjInfo> out;
@@ -62,6 +90,12 @@ std::vector<ObjInfo> read_sector_objects(const Mem& mem, uint32_t sector_addr, s
                 if (ru32(mem, tf + off::TF_X, w)) o.x = (int32_t)w;
                 if (ru32(mem, tf + off::TF_Y, w)) o.y = (int32_t)w;
                 if (ru32(mem, tf + off::TF_Z, w)) o.z = (int32_t)w;
+            }
+
+            // Jump gates: show the destination sector instead of just "Gate".
+            if (o.type == off::TYPE_GATE) {
+                std::string dest = gate_dest_sector_name(mem, node);
+                if (!dest.empty()) o.name = "-> " + dest;
             }
 
             // Distance from the player (for display + the scanner-range gate).
