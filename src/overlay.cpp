@@ -692,11 +692,13 @@ static void map_panel(void)
     if (!ImGui::Begin("x3ui - sector map")) { ImGui::End(); return; }
     mem_open();
 
-    // Throttle: re-walk at most ~6x/sec (cheap, but no need per-frame).
+    // Throttle: re-walk ~6x/sec. Also FREEZE the refresh while the user is hovering
+    // this window, so scrolling the table isn't fighting the live data churn.
     static x3::SectorView view;
     static double last = -1.0;
+    static bool frozen = false;          // hover state captured at end of last frame
     double now = ImGui::GetTime();
-    if (last < 0.0 || (now - last) > 0.15) {
+    if (!frozen && (last < 0.0 || (now - last) > 0.15)) {
         view = x3::read_current_sector(make_engine_mem());
         last = now;
     }
@@ -741,6 +743,9 @@ static void map_panel(void)
         }
         ImGui::EndTable();
     }
+    ImGui::TextDisabled("frozen=%d (refresh pauses while hovering)", frozen ? 1 : 0);
+    frozen = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
+                                    ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     ImGui::End();
 }
 
