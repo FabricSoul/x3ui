@@ -32,6 +32,8 @@ struct SectorView {
     std::string          sector_name;
     std::vector<ObjInfo> objects;
     int64_t              scanner_range = 0;   // gravidar scanner range (raw units; 0 = unknown)
+    bool                 player_valid  = false;
+    int32_t              player_x = 0, player_y = 0, player_z = 0;  // player pos (raw units)
 };
 
 // Player position + scanner range, for the gravidar visibility test (ships beyond

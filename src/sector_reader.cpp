@@ -162,6 +162,17 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
         v.sector_name = mem.cstr(nameptr, 64);
     RangeCtx rc = resolve_range_ctx(mem, scene);
     v.scanner_range = rc.valid ? rc.range : 0;
+    // Player position for the 3D map center (independent of scanner range).
+    {
+        uint32_t player = 0, ptf = 0, px = 0, py = 0, pz = 0;
+        if (ru32(mem, scene + off::SCENE_PLAYER_ANCHOR, player) && player &&
+            ru32(mem, player + off::OBJ_TRANSFORM, ptf) && ptf &&
+            ru32(mem, ptf + off::TF_X, px) && ru32(mem, ptf + off::TF_Y, py) &&
+            ru32(mem, ptf + off::TF_Z, pz)) {
+            v.player_valid = true;
+            v.player_x = (int32_t)px; v.player_y = (int32_t)py; v.player_z = (int32_t)pz;
+        }
+    }
     v.objects = read_sector_objects(mem, sector, cap, &rc);
 
     // Stable display order by object id, so the live 6 Hz refresh doesn't reshuffle

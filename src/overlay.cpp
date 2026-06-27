@@ -32,6 +32,8 @@
 #include <cstring>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 #include <SDL2/SDL.h>
 
@@ -768,6 +770,185 @@ static void map_panel(void)
     ImGui::End();
 }
 
+// ---- 3D sector map (orbit camera, ImGui draw-list) ------------------------
+struct Camera3D { float yaw = 0.7f, pitch = 0.5f, dist = 70.0f; };
+
+// Project a world point (km, target at origin) to screen. False if behind camera.
+static bool project3d(const Camera3D& c, ImVec2 ctr, float focal,
+                      float wx, float wy, float wz, ImVec2& out, float& depth)
+{
+    float cp = cosf(c.pitch), sp = sinf(c.pitch), cy = cosf(c.yaw), sy = sinf(c.yaw);
+    float ex = c.dist*cp*sy, ey = c.dist*sp, ez = c.dist*cp*cy;   // eye (rel. target)
+    float fx = -ex, fy = -ey, fz = -ez, fl = sqrtf(fx*fx+fy*fy+fz*fz);
+    if (fl < 1e-6f) return false;
+    fx/=fl; fy/=fl; fz/=fl;                                       // forward
+    float rx = -fz, ry = 0.0f, rz = fx, rl = sqrtf(rx*rx+rz*rz);  // right = cross(f,up0)
+    if (rl < 1e-6f) { rx = 1; rz = 0; rl = 1; }
+    rx/=rl; rz/=rl;
+    float ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;  // up = cross(r,f)
+    float px = wx-ex, py = wy-ey, pz = wz-ez;
+    float vx = px*rx + py*ry + pz*rz;
+    float vy = px*ux + py*uy + pz*uz;
+    float vz = px*fx + py*fy + pz*fz;                            // depth
+    if (vz < 0.05f) return false;
+    out.x = ctr.x + (vx/vz)*focal;
+    out.y = ctr.y - (vy/vz)*focal;
+    depth = vz;
+    return true;
+}
+
+static ImU32 type_color(int16_t t)
+{
+    switch (t) {
+        case x3::off::TYPE_SHIP:     return IM_COL32(120, 200, 255, 255);
+        case x3::off::TYPE_STATION:  return IM_COL32(255, 210,  90, 255);
+        case x3::off::TYPE_FACTORY:  return IM_COL32(255, 150,  60, 255);
+        case x3::off::TYPE_GATE:     return IM_COL32(120, 255, 150, 255);
+        case x3::off::TYPE_ASTEROID: return IM_COL32(170, 150, 130, 255);
+        case x3::off::TYPE_SUN:      return IM_COL32(255, 245, 200, 255);
+        case x3::off::TYPE_PLANET:   return IM_COL32(110, 150, 230, 255);
+        default:                     return IM_COL32(185, 185, 185, 255);
+    }
+}
+
+static void map3d_panel(void)
+{
+    ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
+    mem_open();
+
+    static x3::SectorView view;
+    static double last = -1.0;
+    static bool   frozen = false;
+    double now = ImGui::GetTime();
+    if (!frozen && (last < 0.0 || (now - last) > 0.15)) {
+        view = x3::read_current_sector(make_engine_mem());
+        last = now;
+    }
+    if (!view.in_sector || !view.player_valid) {
+        ImGui::TextDisabled("not in a sector");
+        ImGui::End();
+        return;
+    }
+
+    static Camera3D cam;
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (avail.x < 64.0f || avail.y < 64.0f) { ImGui::End(); return; }
+    ImVec2 p0  = ImGui::GetCursorScreenPos();
+    ImVec2 p1  = ImVec2(p0.x + avail.x, p0.y + avail.y);
+    ImVec2 ctr = ImVec2(p0.x + avail.x * 0.5f, p0.y + avail.y * 0.5f);
+    float  focal = avail.y * 0.5f / tanf(0.45f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImGui::InvisibleButton("canvas3d", avail);
+    bool hov = ImGui::IsItemHovered();
+    if (ImGui::IsItemActive()) {                       // left-drag orbits
+        ImVec2 d = ImGui::GetIO().MouseDelta;
+        cam.yaw   -= d.x * 0.008f;
+        cam.pitch += d.y * 0.008f;
+        cam.pitch = cam.pitch >  1.50f ?  1.50f : (cam.pitch < -1.50f ? -1.50f : cam.pitch);
+    }
+    if (hov) {                                         // wheel zooms (dolly)
+        float wh = ImGui::GetIO().MouseWheel;
+        if (wh != 0.0f) cam.dist *= powf(0.85f, wh);
+        cam.dist = cam.dist < 3.0f ? 3.0f : (cam.dist > 600.0f ? 600.0f : cam.dist);
+    }
+
+    dl->PushClipRect(p0, p1, true);
+    dl->AddRectFilled(p0, p1, IM_COL32(7, 9, 16, 255));
+
+    // starfield (generated once in normalized coords)
+    static bool stars_init = false;
+    static ImVec2 stars[160]; static float star_b[160];
+    if (!stars_init) {
+        uint32_t s = 0x1234567u;
+        for (int i = 0; i < 160; ++i) {
+            s = s*1664525u + 1013904223u; float a = ((s >> 8) & 0xFFFF) / 65535.0f;
+            s = s*1664525u + 1013904223u; float b = ((s >> 8) & 0xFFFF) / 65535.0f;
+            s = s*1664525u + 1013904223u; float c = ((s >> 8) & 0xFFFF) / 65535.0f;
+            stars[i] = ImVec2(a, b); star_b[i] = 0.2f + 0.6f*c;
+        }
+        stars_init = true;
+    }
+    for (int i = 0; i < 160; ++i) {
+        ImVec2 sp(p0.x + stars[i].x*avail.x, p0.y + stars[i].y*avail.y);
+        dl->AddRectFilled(sp, ImVec2(sp.x+1, sp.y+1),
+                          IM_COL32(200, 210, 235, (int)(star_b[i]*160)));
+    }
+
+    const float U = x3::off::UNITS_PER_KM;
+    auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
+    auto KY = [&](int32_t a){ return (a - view.player_y) / U; };
+    auto KZ = [&](int32_t a){ return (a - view.player_z) / U; };
+
+    // ecliptic grid on y=0
+    {
+        const float G = 40.0f, step = 10.0f; ImU32 gc = IM_COL32(40, 70, 110, 90);
+        for (float g = -G; g <= G + 0.1f; g += step) {
+            ImVec2 a, b; float d;
+            if (project3d(cam, ctr, focal, g, 0, -G, a, d) &&
+                project3d(cam, ctr, focal, g, 0,  G, b, d)) dl->AddLine(a, b, gc, 1.0f);
+            if (project3d(cam, ctr, focal, -G, 0, g, a, d) &&
+                project3d(cam, ctr, focal,  G, 0, g, b, d)) dl->AddLine(a, b, gc, 1.0f);
+        }
+    }
+    // scanner-range ring on the plane
+    if (view.scanner_range > 0) {
+        float r = (float)view.scanner_range / U;
+        ImVec2 prev; bool has = false; float d;
+        for (int i = 0; i <= 48; ++i) {
+            float a = (float)i / 48.0f * 6.2831853f; ImVec2 s;
+            if (project3d(cam, ctr, focal, r*cosf(a), 0, r*sinf(a), s, d)) {
+                if (has) dl->AddLine(prev, s, IM_COL32(70, 180, 200, 130), 1.5f);
+                prev = s; has = true;
+            } else has = false;
+        }
+    }
+
+    // objects: project, depth-sort far->near, draw drop line + glow + dot + label
+    struct PObj { float depth; ImVec2 s, ground; bool gok; const x3::ObjInfo* o; };
+    std::vector<PObj> ps; ps.reserve(view.objects.size());
+    for (const auto& o : view.objects) {
+        ImVec2 s; float d;
+        if (!project3d(cam, ctr, focal, KX(o.x), KY(o.y), KZ(o.z), s, d)) continue;
+        PObj e; e.depth = d; e.s = s; e.o = &o; float gd;
+        e.gok = project3d(cam, ctr, focal, KX(o.x), 0, KZ(o.z), e.ground, gd);
+        ps.push_back(e);
+    }
+    std::sort(ps.begin(), ps.end(), [](const PObj& a, const PObj& b){ return a.depth > b.depth; });
+    for (const auto& e : ps) {
+        const auto& o = *e.o; ImU32 col = type_color(o.type);
+        if (e.gok) dl->AddLine(e.ground, e.s, (col & 0x00FFFFFFu) | 0x33000000u, 1.0f);
+        float rad = 70.0f / e.depth; rad = rad < 1.5f ? 1.5f : (rad > 9.0f ? 9.0f : rad);
+        dl->AddCircleFilled(e.s, rad*2.4f, (col & 0x00FFFFFFu) | 0x22000000u);
+        dl->AddCircleFilled(e.s, rad, col);
+        bool lbl = (o.type==x3::off::TYPE_STATION || o.type==x3::off::TYPE_FACTORY ||
+                    o.type==x3::off::TYPE_GATE || o.type==x3::off::TYPE_SUN ||
+                    o.type==x3::off::TYPE_PLANET);
+        if (lbl && !o.name.empty())
+            dl->AddText(ImVec2(e.s.x + rad + 3, e.s.y - 6),
+                        IM_COL32(220, 225, 235, 200), o.name.c_str());
+    }
+    // player marker at origin
+    {
+        ImVec2 s; float d;
+        if (project3d(cam, ctr, focal, 0, 0, 0, s, d)) {
+            dl->AddCircleFilled(s, 5.0f, IM_COL32(120, 255, 160, 255));
+            dl->AddCircle(s, 8.0f, IM_COL32(120, 255, 160, 160), 0, 1.5f);
+            dl->AddText(ImVec2(s.x + 10, s.y - 6), IM_COL32(150, 255, 180, 230), "YOU");
+        }
+    }
+    dl->PopClipRect();
+    if (!view.sector_name.empty())
+        dl->AddText(ImVec2(p0.x + 6, p0.y + 4), IM_COL32(180, 200, 220, 210),
+                    view.sector_name.c_str());
+
+    frozen = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
+                                    ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    ImGui::End();
+}
+
 static void overlay_draw(void)
 {
     ImGui_ImplOpenGL3_NewFrame();
@@ -823,6 +1004,7 @@ static void overlay_draw(void)
     state_bridge_window();
     ship_window();
     map_panel();
+    map3d_panel();
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
