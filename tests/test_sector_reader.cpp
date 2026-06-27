@@ -496,6 +496,75 @@ static void test_object_transform_translation() {
     CHECK(placed);
 }
 
+// --- triangle index emission (for solid rendering) -----------------------------
+static void test_object_tri_emission() {
+    FakeMem fm;
+    uint32_t obj = 0x5000, alloc = 0x60000;
+    fm.w(0x082a0640, 0x100);
+    uint32_t chain = 0x100 + 0x8;
+    reg_model(fm, 20, 3, 0.0f, 0.0f, 0.0f, alloc, chain);   // root: 3 verts + 1 tri
+    reg_model(fm, 21, 3, 0.0f, 0.0f, 0.0f, alloc, chain);   // child: 3 verts + 1 tri
+    uint32_t root = 0x4000, child = 0x4200;
+    fm.w(obj + 0x6c, root);
+    fm.w(root + 0x12c, 20);
+    fm.w(root + 0xc, child);
+    fm.w(child + 0x12c, 21);
+    auto w = x3::read_object_wireframe(fm.mem(), obj);
+    CHECK(w.ok);
+    CHECK_EQ(w.tris.size(), (size_t)6);     // 2 tris * 3 indices
+    bool rebased = false;                   // child's tri indices offset into [3,6)
+    for (uint32_t t : w.tris) { CHECK(t < w.vcount()); if (t >= 3) rebased = true; }
+    CHECK(rebased);
+}
+
+// --- node world orientation read (16.16, transposed/col-major) ------------------
+static void test_read_node_orient() {
+    // Unset node (every field reads 0) => returns false + identity in out.
+    FakeMem fm;
+    uint32_t node = 0x4000;
+    float R[9];
+    bool set0 = x3::read_node_orient(fm.mem(), node, 0x3c, R);
+    CHECK(!set0);                                      // nothing set => "false" (unset)
+    CHECK(R[0] > 0.99f && R[0] < 1.01f);              // out is identity
+    CHECK(R[4] > 0.99f && R[4] < 1.01f);
+    CHECK(R[8] > 0.99f && R[8] < 1.01f);
+    CHECK(R[1] > -0.01f && R[1] < 0.01f);
+
+    // Real identity (diagonal stored as 0x10000) => returns true, out identity.
+    FakeMem fi;
+    fi.w(node + 0x3c + 0 * 0x10 + 0 * 4, 0x10000);
+    fi.w(node + 0x3c + 1 * 0x10 + 1 * 4, 0x10000);
+    fi.w(node + 0x3c + 2 * 0x10 + 2 * 4, 0x10000);
+    float Ri[9];
+    bool seti = x3::read_node_orient(fi.mem(), node, 0x3c, Ri);
+    CHECK(seti);
+    CHECK(Ri[0] > 0.99f && Ri[0] < 1.01f);
+    CHECK(Ri[4] > 0.99f && Ri[4] < 1.01f);
+    CHECK(Ri[1] > -0.01f && Ri[1] < 0.01f);
+
+    FakeMem f2;
+    f2.w(node + 0x3c + 0 * 0x10 + 1 * 4, 0x10000);   // stored [0][1] = 1.0
+    float R2[9];
+    bool nn = x3::read_node_orient(f2.mem(), node, 0x3c, R2);
+    CHECK(nn);
+    CHECK(R2[3] > 0.99f && R2[3] < 1.01f);            // R[1][0] (transpose of stored[0][1])
+    CHECK(R2[1] > -0.01f && R2[1] < 0.01f);           // R[0][1] stays 0
+}
+
+// --- per-vertex normals from triangles -----------------------------------------
+static void test_vertex_normals() {
+    std::vector<float> verts = { 0,0,0,  1,0,0,  0,1,0 };
+    std::vector<uint32_t> tris = { 0, 1, 2 };
+    std::vector<float> n = x3::compute_vertex_normals(verts, tris);
+    CHECK_EQ(n.size(), verts.size());
+    for (int v = 0; v < 3; ++v) {
+        float nx = n[v*3+0], ny = n[v*3+1], nz = n[v*3+2];
+        CHECK(nx > -0.01f && nx < 0.01f);
+        CHECK(ny > -0.01f && ny < 0.01f);
+        CHECK(nz > 0.99f || nz < -0.99f);                 // unit, along Z
+    }
+}
+
 int main() {
     RUN(test_null_scene);
     RUN(test_visibility_filter);
@@ -509,6 +578,9 @@ int main() {
     RUN(test_object_finest_lod);
     RUN(test_object_node_cap);
     RUN(test_object_edge_rebase);
+    RUN(test_object_tri_emission);
+    RUN(test_read_node_orient);
+    RUN(test_vertex_normals);
     RUN(test_object_transform_translation);
     RUN(test_two_objects);
     RUN(test_fallback_climbs_to_sector);

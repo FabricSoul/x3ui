@@ -98,6 +98,9 @@ static MeshWire read_node_mesh(const Mem& mem, uint32_t node, int lodsel,
                 uint32_t tri = tris + t * 0x10, v0 = 0, v1 = 0, v2 = 0;
                 if (!ru32(mem, tri + 0, v0) || !ru32(mem, tri + 4, v1) || !ru32(mem, tri + 8, v2)) break;
                 add_edge(v0, v1); add_edge(v1, v2); add_edge(v2, v0);
+                if (v0 < vcount && v1 < vcount && v2 < vcount) {
+                    w.tris.push_back(v0); w.tris.push_back(v1); w.tris.push_back(v2);
+                }
             }
         }
     }
@@ -264,10 +267,59 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
             if (stats) stats->kept++;
             for (float v : tv) out.verts.push_back(v);
             for (uint32_t e : part.edges) out.edges.push_back(base + e);
+            for (uint32_t t : part.tris) out.tris.push_back(base + t);
         } else if (stats) stats->dropped_guard++;
     }
     out.ok = !out.verts.empty();
     return out;
+}
+
+bool read_object_root(const Mem& mem, uint32_t obj_addr, uint32_t& out_root) {
+    uint32_t r = 0;
+    if (!ru32(mem, obj_addr + 0x6c, r) || !r) return false;
+    out_root = r; return true;
+}
+
+bool read_node_orient(const Mem& mem, uint32_t node, uint32_t orient_off, float out[9]) {
+    auto gi = [&](uint32_t off) -> int32_t { uint32_t v = 0; ru32(mem, node + off, v); return (int32_t)v; };
+    uint32_t rbits = 0;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            // transposed read (swap i/j in the offset), as node_world_xform does for +0xac
+            int32_t r = gi(orient_off + (uint32_t)j * 0x10 + (uint32_t)i * 4);
+            rbits |= (uint32_t)r;
+            out[i * 3 + j] = r / 65536.0f;
+        }
+    if (rbits == 0) {
+        for (int k = 0; k < 9; ++k) out[k] = 0.0f;
+        out[0] = out[4] = out[8] = 1.0f;
+        return false;
+    }
+    return true;
+}
+
+std::vector<float> compute_vertex_normals(const std::vector<float>& verts,
+                                          const std::vector<uint32_t>& tris) {
+    std::vector<float> n(verts.size(), 0.0f);
+    size_t vc = verts.size() / 3;
+    for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+        uint32_t a = tris[t], b = tris[t + 1], c = tris[t + 2];
+        if (a >= vc || b >= vc || c >= vc) continue;
+        float ax = verts[a*3], ay = verts[a*3+1], az = verts[a*3+2];
+        float bx = verts[b*3], by = verts[b*3+1], bz = verts[b*3+2];
+        float cx = verts[c*3], cy = verts[c*3+1], cz = verts[c*3+2];
+        float ux = bx-ax, uy = by-ay, uz = bz-az;
+        float vx = cx-ax, vy = cy-ay, vz = cz-az;
+        float fx = uy*vz - uz*vy, fy = uz*vx - ux*vz, fz = ux*vy - uy*vx;  // face normal (area-weighted)
+        for (uint32_t idx : {a, b, c}) { n[idx*3]+=fx; n[idx*3+1]+=fy; n[idx*3+2]+=fz; }
+    }
+    for (size_t i = 0; i < vc; ++i) {
+        float x = n[i*3], y = n[i*3+1], z = n[i*3+2];
+        float L = std::sqrt(x*x + y*y + z*z);
+        if (L > 1e-12f) { n[i*3]=x/L; n[i*3+1]=y/L; n[i*3+2]=z/L; }
+        else { n[i*3]=0; n[i*3+1]=0; n[i*3+2]=1; }
+    }
+    return n;
 }
 
 // Replace each "{page, id}" token in a name with its resolved text. Tokens that

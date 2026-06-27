@@ -87,6 +87,7 @@ std::string resolve_text(const Mem& mem, uint32_t page, uint32_t id);
 struct MeshWire {
     std::vector<float>    verts;   // flat x,y,z triples (model-local units)
     std::vector<uint32_t> edges;   // flat index pairs into verts (i0,i1,i0,i1,...)
+    std::vector<uint32_t> tris;    // flat index triples into verts (v0,v1,v2,...) for solid fill
     bool ok = false;
     size_t vcount() const { return verts.size() / 3; }
 };
@@ -123,5 +124,22 @@ MeshWire read_object_wireframe(const Mem& mem, uint32_t obj_addr,
                                size_t node_cap = 512, size_t vcap = 200000,
                                size_t ecap = 600000, int lod_level = 0,
                                uint32_t min_model_id = 0, ObjWireStats* stats = nullptr);
+
+// Root transform node of an object (= *(obj+0x6c)). false if unreadable/null.
+bool read_object_root(const Mem& mem, uint32_t obj_addr, uint32_t& out_root);
+
+// Read a node's 3x3 orientation at byte offset `orient_off` (16.16 fixed, /65536),
+// in the overlay's row-major convention (transposed from how the engine stores it,
+// matching node_world_xform's +0xac read). out[i*3+j] = R[i][j]. Returns true if the
+// matrix is non-identity (any off-diagonal or non-1 diagonal); false (and identity in
+// `out`) when every field reads 0. Use orient_off=0x3c for a top-level object's live
+// world orientation (== +0xac, sim-maintained even off-screen).
+bool read_node_orient(const Mem& mem, uint32_t node, uint32_t orient_off, float out[9]);
+
+// Per-vertex normals (flat x,y,z triples, same count as verts) from a triangle index
+// list, by accumulating face normals and normalizing. Degenerate/zero normals become
+// (0,0,1). Pure (no engine reads) — for the holographic fresnel shader.
+std::vector<float> compute_vertex_normals(const std::vector<float>& verts,
+                                          const std::vector<uint32_t>& tris);
 
 } // namespace x3
