@@ -293,13 +293,19 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         int i = 0;
         for (const auto &o : v.objects) {
             if (i++ >= 256) break;
-            uint32_t f40 = 0, f44 = 0;
-            u32(o.addr + off::OBJ_FLAGS, f40);
-            u32(o.addr + off::OBJ_FLAGS2, f44);
+            // root transform node + its world-orient forward vector (+0x44/54/64, 16.16)
+            // and right vector (+0x3c/4c/5c) so per-object heading is visible live.
+            uint32_t root = 0; u32(o.addr + 0x6c, root);
+            auto f16 = [&](uint32_t a) -> float { uint32_t v = 0; u32(a, v); return (int32_t)v / 65536.0f; };
+            float fx = 0, fy = 0, fz = 0, rx = 0, ry = 0, rz = 0;
+            if (root) {
+                fx = f16(root + 0x44); fy = f16(root + 0x54); fz = f16(root + 0x64);
+                rx = f16(root + 0x3c); ry = f16(root + 0x4c); rz = f16(root + 0x5c);
+            }
             snprintf(b, sizeof b,
-                     "\n  id=%u type=%d sub=%d rel=%d f40=0x%08x f44=0x%08x name=\"%s\" dist=%d",
-                     o.id, (int)o.type, (int)o.subtype, (int)o.relation, f40, f44,
-                     o.name.c_str(), o.dist);
+                     "\n  id=%u addr=0x%08x type=%d sub=%d rel=%d name=\"%s\" fwd=%.2f,%.2f,%.2f rgt=%.2f,%.2f,%.2f",
+                     o.id, o.addr, (int)o.type, (int)o.subtype, (int)o.relation,
+                     o.name.c_str(), fx, fy, fz, rx, ry, rz);
             r += b;
         }
         return r;

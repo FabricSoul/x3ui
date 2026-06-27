@@ -1091,9 +1091,12 @@ static void init() {
         "#version 130\n"
         "in vec3 vN; in vec3 vP; uniform vec4 uColor; out vec4 frag;\n"
         "void main(){ vec3 N=normalize(vN); vec3 V=normalize(-vP);\n"
-        "  float f=pow(1.0-clamp(abs(dot(N,V)),0.0,1.0),2.5);\n"   // abs: rim glow on near AND far faces
-        "  float i=0.18+0.9*f;\n"                                   // base fill + rim gain
-        "  frag=vec4(uColor.rgb*i, uColor.a*i); }\n";
+        "  float ndv=max(dot(N,V),0.0);\n"
+        "  float lit=0.30+0.70*ndv;\n"                              // headlight lambert -> shows facing
+        "  float fres=pow(1.0-ndv,3.0);\n"                          // grazing rim glow
+        "  vec3 c=uColor.rgb*lit + vec3(0.55,0.85,1.0)*fres*0.45;\n"// cyan-ish holo rim
+        "  float a=clamp(uColor.a*(0.70+0.45*fres),0.0,1.0);\n"     // translucent but solid enough to read pose
+        "  frag=vec4(c,a); }\n";
     GLuint sv = pCreateShader(GL_VERTEX_SHADER);   pShaderSource(sv,1,&svs,nullptr); pCompileShader(sv);
     GLuint sf = pCreateShader(GL_FRAGMENT_SHADER); pShaderSource(sf,1,&sfs,nullptr); pCompileShader(sf);
     g_sprog = pCreateProgram(); pAttachShader(g_sprog,sv); pAttachShader(g_sprog,sf);
@@ -1181,10 +1184,14 @@ static void solid_cb(const ImDrawList*, const ImDrawCmd*) {
     GLint old_vp[4]; glGetIntegerv(GL_VIEWPORT, old_vp);
     glViewport(g_svx,g_svy,g_svw,g_svh);
     glEnable(GL_SCISSOR_TEST); glScissor(g_svx,g_svy,g_svw,g_svh);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive
-    glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDisable(GL_CULL_FACE);
+    // Own depth buffer for the viewer region so near faces occlude far ones -> the hull's
+    // 3D pose (heading/roll) is readable. Depth mask must be on for glClear(depth).
+    glDepthMask(GL_TRUE); glClearDepth(1.0); glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  // translucent, not additive
+    glDisable(GL_CULL_FACE);
     pUseProgram(g_sprog);
-    for (const auto& s : g_solids) {
+    for (const auto& s : g_solids) {                          // far->near
         if (!s.h || !s.h->icount) continue;
         pUniformMatrix4fv(g_suMVP,1,GL_FALSE,s.mvp);
         pUniformMatrix4fv(g_suMV,1,GL_FALSE,s.mv);
@@ -1193,7 +1200,7 @@ static void solid_cb(const ImDrawList*, const ImDrawCmd*) {
         glDrawElements(GL_TRIANGLES,s.h->icount,GL_UNSIGNED_INT,(const void*)0);
     }
     pBindVertexArray(0);
-    glDepthMask(GL_TRUE);
+    glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
     glViewport(old_vp[0], old_vp[1], old_vp[2], old_vp[3]);
 }
@@ -1278,7 +1285,7 @@ static void hull_gc(const std::vector<x3::ObjInfo>& live) {
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.32f);               // translucent holo viewer
+    ImGui::SetNextWindowBgAlpha(0.55f);               // map panel reads clearly (not washed out)
     if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
     mem_open();
 
@@ -1389,7 +1396,7 @@ static void map3d_panel(void)
     }
 
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(6, 16, 24, 96));   // translucent: space shows through (holo)
+    dl->AddRectFilled(p0, p1, IM_COL32(6, 14, 22, 234));  // near-solid so the sensor map reads clearly
 
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
@@ -1686,7 +1693,7 @@ static void mesh_preview_panel(void)
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(6, 16, 24, 96));   // translucent holo backdrop
+    // no backdrop: the mesh floats holographically over the scene (per design)
 
     if (meshgl::g_ok) {
         // GPU path: projection happens on the GPU via an MVP uniform; one draw call.
