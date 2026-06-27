@@ -117,6 +117,15 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         return b;
     }
 
+    if (op == "owire") {   // whole-object wireframe: owire <obj_addr>
+        std::string at; is >> at;
+        uint32_t a = parse_addr(at);
+        MeshWire w = read_object_wireframe(mem, a);
+        snprintf(b, sizeof b, "ok addr=0x%x | obj.ok=%d v=%zu tris=%zu",
+                 a, (int)w.ok, w.vcount(), w.edges.size() / 6);
+        return b;
+    }
+
     if (op == "text") {   // resolve a {page,id} text ref:  text <page> <id>
         uint32_t page = 0, id = 0;
         is >> page >> id;
