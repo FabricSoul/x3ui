@@ -1,6 +1,8 @@
 #include "sector_reader.h"
 #include "struct_offsets.h"
 
+#include <algorithm>
+
 namespace x3 {
 
 static bool ru32(const Mem& m, uint32_t addr, uint32_t& out) {
@@ -99,6 +101,11 @@ SectorView read_current_sector(const Mem& mem, uint32_t scene_global, size_t cap
     if (ru32(mem, sector + off::OBJ_NAME, nameptr) && nameptr && mem.cstr)
         v.sector_name = mem.cstr(nameptr, 64);
     v.objects = read_sector_objects(mem, sector, cap);
+
+    // Stable display order by object id, so the live 6 Hz refresh doesn't reshuffle
+    // rows under the user (which made the table scroll snap/twitch).
+    std::sort(v.objects.begin(), v.objects.end(),
+              [](const ObjInfo& a, const ObjInfo& b) { return a.id < b.id; });
     return v;
 }
 
