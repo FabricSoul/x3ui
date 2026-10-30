@@ -202,6 +202,166 @@ std::string handle_request(const Mem &mem, const std::string &line) {
         snprintf(b, sizeof b, "ok type=%d sub=%d", i16lo(w), i16hi(w));
         return b;
     }
+    if (op == "dock") {                       // WRITE op: self-test the player dock bridge
+        std::string sa, sc, sb, sn, sd; is >> sa >> sc >> sb >> sn >> sd;
+        uint32_t a = parse_addr(sa);
+        int cmd    = sc.empty() ? 4  : (int)strtol(sc.c_str(), nullptr, 0);
+        int bay    = sb.empty() ? -1 : (int)strtol(sb.c_str(), nullptr, 0);
+        int notify = sn.empty() ? 0  : (int)strtol(sn.c_str(), nullptr, 0);
+        int dmode  = sd.empty() ? 0  : (int)strtol(sd.c_str(), nullptr, 0);
+        if (!mem.issue_dock) return "err no issue_dock";
+        return mem.issue_dock(a, cmd, bay, notify, dmode);
+    }
+    if (op == "dockscript") {                 // spawn !move.movetostation orchestrator on player ship
+        std::string sa, sm; is >> sa >> sm;
+        uint32_t a = parse_addr(sa);
+        int mode = sm.empty() ? 0 : (int)strtol(sm.c_str(), nullptr, 0);
+        if (!mem.dockscript) return "err no dockscript";
+        return mem.dockscript(a, mode);
+    }
+    if (op == "runscript") {                  // runscript <name> <this_hex> <arg_hex> [argc=1] [sync=0]
+        std::string nm, st, sg, sc, sy; is >> nm >> st >> sg >> sc >> sy;
+        if (nm.empty()) return "err usage: runscript <name> <this> <arg> [argc] [sync]";
+        uint32_t thisH = (uint32_t)strtoul(st.c_str(), nullptr, 0);
+        uint32_t arg   = (uint32_t)strtoul(sg.c_str(), nullptr, 0);
+        int argc = sc.empty() ? 1 : (int)strtol(sc.c_str(), nullptr, 0);
+        int sync = sy.empty() ? 0 : (int)strtol(sy.c_str(), nullptr, 0);
+        if (!mem.runscript) return "err no runscript";
+        return mem.runscript(nm, thisH, arg, argc, sync);
+    }
+    if (op == "runscript2") {                 // runscript2 <name> <this_hex> <sync> <a0> [a1] [a2] [a3] [a4]
+        std::string nm, st, sy; is >> nm >> st >> sy;
+        if (nm.empty()) return "err usage: runscript2 <name> <this> <sync> <a0> [a1..a4]";
+        uint32_t thisH = (uint32_t)strtoul(st.c_str(), nullptr, 0);
+        int sync = sy.empty() ? 0 : (int)strtol(sy.c_str(), nullptr, 0);
+        std::vector<uint32_t> args; std::string av;
+        while ((is >> av) && args.size() < 5) args.push_back((uint32_t)strtoul(av.c_str(), nullptr, 0));
+        if (!mem.runscript2) return "err no runscript2";
+        return mem.runscript2(nm, thisH, args, sync);
+    }
+    if (op == "dockdrive") {                  // dockdrive <station> [op=10] [bay=0] [on=1] — per-frame auto-dock
+        std::string sa, so, sb, sn; is >> sa >> so >> sb >> sn;
+        uint32_t a = parse_addr(sa);
+        int dop = so.empty() ? 10 : (int)strtol(so.c_str(), nullptr, 0);
+        int bay = sb.empty() ? 0  : (int)strtol(sb.c_str(), nullptr, 0);
+        int on  = sn.empty() ? 1  : (int)strtol(sn.c_str(), nullptr, 0);
+        if (!mem.dockdrive) return "err no dockdrive";
+        return mem.dockdrive(a, dop, bay, on);
+    }
+    if (op == "synthkey") {                   // synthkey <scancode> <sym_hex> [mod=0] [down=1]
+        std::string ss, sy, sm, sd; is >> ss >> sy >> sm >> sd;
+        int sc = (int)strtol(ss.c_str(), nullptr, 0);
+        int sym = (int)strtol(sy.c_str(), nullptr, 0);
+        int mod = sm.empty() ? 0 : (int)strtol(sm.c_str(), nullptr, 0);
+        int down = sd.empty() ? 1 : (int)strtol(sd.c_str(), nullptr, 0);
+        if (!mem.synthkey) return "err no synthkey";
+        return mem.synthkey(sc, sym, mod, down);
+    }
+    if (op == "synthhold") {                  // synthhold <scancode> [shift=0] [frames=4] — STATE inject
+        std::string ss, sh, sf; is >> ss >> sh >> sf;
+        int sc = (int)strtol(ss.c_str(), nullptr, 0);
+        int shift = sh.empty() ? 0 : (int)strtol(sh.c_str(), nullptr, 0);
+        int frames = sf.empty() ? 4 : (int)strtol(sf.c_str(), nullptr, 0);
+        if (!mem.synthhold) return "err no synthhold";
+        return mem.synthhold(sc, shift, frames);
+    }
+    if (op == "settarget") { std::string sa; is >> sa; uint32_t a=parse_addr(sa); if(!mem.settarget) return "err no settarget"; return mem.settarget(a); }
+    if (op == "callfn1") { std::string sa, sg; is >> sa >> sg; uint32_t a=parse_addr(sa), g=(uint32_t)strtoul(sg.c_str(),nullptr,0); if(!mem.callfn1) return "err no callfn1"; return mem.callfn1(a,g); }
+    if (op == "callfn3") { std::string sa,s0,s1,s2; is >> sa >> s0 >> s1 >> s2; uint32_t a=parse_addr(sa), a0=parse_addr(s0), a1=parse_addr(s1), a2=(uint32_t)strtoul(s2.c_str(),nullptr,0); if(!mem.callfn3) return "err no callfn3"; return mem.callfn3(a,a0,a1,a2); }
+    if (op == "sacall") { std::string ss,sn,s0,s1,s2,s3; is >> ss >> sn >> s0 >> s1 >> s2 >> s3; int sub=(int)strtol(ss.c_str(),nullptr,0), n=(int)strtol(sn.c_str(),nullptr,0); uint32_t c0=parse_addr(s0),c1=parse_addr(s1),c2=parse_addr(s2),c3=parse_addr(s3); if(!mem.sacall) return "err no sacall"; return mem.sacall(sub,n,c0,c1,c2,c3); }
+    if (op == "poke") { std::string sa,sv; is >> sa >> sv; uint32_t a=parse_addr(sa), v=parse_addr(sv); if(!mem.poke) return "err no poke"; return mem.poke(a,v); }
+    if (op == "tracedock") { std::string sc,st; is >> sc >> st; uint32_t c = sc.empty()?0x1064:(uint32_t)strtoul(sc.c_str(),nullptr,0); uint32_t ta = st.empty()?0:parse_addr(st); if(!mem.tracedock) return "err no tracedock"; return mem.tracedock(c,ta); }
+    if (op == "spawnorch") { std::string ss,sg; is >> ss >> sg; uint32_t st=parse_addr(ss); int stage = sg.empty()?0:(int)strtol(sg.c_str(),nullptr,0); if(!mem.spawnorch) return "err no spawnorch"; return mem.spawnorch(st,stage); }
+    if (op == "synthdiag") { if (!mem.synthdiag) return "err no synthdiag"; return mem.synthdiag(); }
+    if (op == "synthdock") {                  // hold SDL_SCANCODE_D(7) + LSHIFT in the polled state = Shift+D
+        if (!mem.synthhold) return "err no synthhold";
+        return mem.synthhold(7, 1, 5);
+    }
+    if (op == "jumpgate") {                   // jumpgate <gate> [overshoot_km]
+        std::string sa, so; is >> sa >> so;
+        uint32_t a = parse_addr(sa);
+        int over = so.empty() ? 4 : (int)strtol(so.c_str(), nullptr, 0);
+        if (!mem.jumpgate) return "err no jumpgate";
+        return mem.jumpgate(a, over);
+    }
+    if (op == "cmdengage") {                  // cmdengage <target> <op> [argc] [bay] [clear200]
+        std::string sa, so, sc, sb, scl; is >> sa >> so >> sc >> sb >> scl;
+        uint32_t a = parse_addr(sa);
+        int oper = so.empty() ? 9 : (int)strtol(so.c_str(), nullptr, 0);
+        int argc = sc.empty() ? (oper == 10 ? 4 : 3) : (int)strtol(sc.c_str(), nullptr, 0);
+        int bay  = sb.empty() ? -1 : (int)strtol(sb.c_str(), nullptr, 0);
+        int cl2  = scl.empty() ? 0 : (int)strtol(scl.c_str(), nullptr, 0);
+        if (!mem.cmdengage) return "err no cmdengage";
+        return mem.cmdengage(a, oper, argc, bay, cl2);
+    }
+    if (op == "setcmd") {                     // setcmd <cmd>  (re-arm payload+0xC4 + bit19)
+        std::string sc; is >> sc;
+        int cmd = sc.empty() ? 5 : (int)strtol(sc.c_str(), nullptr, 0);
+        if (!mem.setcmd) return "err no setcmd";
+        return mem.setcmd(cmd);
+    }
+    if (op == "watchwrite") {                 // watchwrite <a0> [a1] [a2] [a3]
+        std::string s0, s1, s2, s3; is >> s0 >> s1 >> s2 >> s3;
+        if (!mem.watchwrite) return "err no watchwrite";
+        return mem.watchwrite(parse_addr(s0), s1.empty()?0:parse_addr(s1),
+                              s2.empty()?0:parse_addr(s2), s3.empty()?0:parse_addr(s3));
+    }
+    if (op == "watchip") {
+        if (!mem.watchip) return "err no watchip";
+        return mem.watchip();
+    }
+    if (op == "drive") {                      // drive <on> [rearm]
+        std::string so, sr; is >> so >> sr;
+        int on = so.empty() ? 1 : (int)strtol(so.c_str(), nullptr, 0);
+        int rearm = sr.empty() ? 0 : (int)strtol(sr.c_str(), nullptr, 0);
+        if (!mem.drive) return "err no drive";
+        return mem.drive(on, rearm);
+    }
+    if (op == "taskid") {                     // taskid <handle>
+        std::string sh; is >> sh;
+        if (!mem.taskid) return "err no taskid";
+        return mem.taskid(parse_addr(sh));
+    }
+    if (op == "spawn") {                      // spawn <scriptKey> <entry> <thisId> <arg> [argc]
+        std::string sk, se, st, sa, sc; is >> sk >> se >> st >> sa >> sc;
+        uint32_t key = (uint32_t)strtoul(sk.c_str(), nullptr, 0);
+        if (se == "-") se = "";               // "-" = null entry
+        uint32_t thisId = (uint32_t)strtoul(st.c_str(), nullptr, 0);
+        uint32_t arg = (uint32_t)strtoul(sa.c_str(), nullptr, 0);
+        int argc = sc.empty() ? 1 : (int)strtol(sc.c_str(), nullptr, 0);
+        if (!mem.spawn) return "err no spawn";
+        return mem.spawn(key, se, thisId, arg, argc);
+    }
+    if (op == "dock2") {                      // dock2 <station> [name] [ctx_hex] [key_hex]
+        std::string sa, sn, sc, sk; is >> sa >> sn >> sc >> sk;
+        uint32_t a = parse_addr(sa);
+        if (sn == "-") sn = "";
+        uint32_t ctx = sc.empty() ? 0 : (uint32_t)strtoul(sc.c_str(), nullptr, 0);
+        uint32_t key = sk.empty() ? 0 : (uint32_t)strtoul(sk.c_str(), nullptr, 0);
+        if (!mem.dock2) return "err no dock2";
+        return mem.dock2(a, sn, ctx, key);
+    }
+    if (op == "vmdock") {                     // vmdock <station> [do_op10=1]
+        std::string sa, so; is >> sa >> so;
+        uint32_t a = parse_addr(sa);
+        int do10 = so.empty() ? 1 : (int)strtol(so.c_str(), nullptr, 0);
+        if (!mem.vmdock) return "err no vmdock";
+        return mem.vmdock(a, do10);
+    }
+    if (op == "natdock") {                    // natdock <station> [stage=3]  (3=field-poke[SAFE], 0=mech-proof, 1/2=VM-task[CRASH])
+        std::string sa, ss; is >> sa >> ss;
+        uint32_t a = parse_addr(sa);
+        int stage = ss.empty() ? 3 : (int)strtol(ss.c_str(), nullptr, 0);
+        if (!mem.natdock) return "err no natdock";
+        return mem.natdock(a, stage);
+    }
+    if (op == "exectrace") {                  // exectrace <addr> [filter]   (addr 0 = disarm+dump)
+        std::string sa, sf; is >> sa >> sf;
+        uint32_t addr = parse_addr(sa);
+        uint32_t filter = sf.empty() ? 0 : (uint32_t)strtoul(sf.c_str(), nullptr, 0);
+        if (!mem.exectrace) return "err no exectrace";
+        return mem.exectrace(addr, filter);
+    }
     if (op == "obj") {
         std::string sa; is >> sa;
         uint32_t a = parse_addr(sa), id = 0, tw = 0, np = 0, tf = 0, x = 0, y = 0, z = 0;

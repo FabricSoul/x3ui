@@ -37,10 +37,16 @@ else
     echo "[x3launch] config: auto-load slot $slot ($savefile)"
 fi
 
-if pgrep -x X3AP_main >/dev/null || pgrep -x X3TC_main >/dev/null; then
-    echo "[x3launch] X3 is still running — quit it in-game first, then re-run this." >&2
+# Only guard against a duplicate Albion Prelude — NEVER X3TC_main: the user plays
+# X3: Terran Conflict on the same machine, concurrently with AP dev, and it must
+# never be disturbed. (Steam permits AP + TC to run side by side.)
+if pgrep -x X3AP_main >/dev/null; then
+    echo "[x3launch] X3AP is still running — quit it in-game first, then re-run this." >&2
     exit 1
 fi
+
+# Keep X3's "Run in background" ON so the sim doesn't pause when the window is unfocused.
+printf '1' > "$HOME/.config/EgoSoft/X3AP/RunInBackground" 2>/dev/null || true
 
 echo "[x3launch] launching: steam -applaunch $APPID"
 exec steam -applaunch "$APPID"

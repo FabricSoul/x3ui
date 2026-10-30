@@ -76,6 +76,16 @@ static pfn_SwapWindow real_SwapWindow = nullptr;
 static pfn_PeepEvents real_PeepEvents = nullptr;
 static pfn_PumpEvents real_PumpEvents = nullptr;
 
+// Color-clear tracking. The game clears the color buffer 1x/frame in flight, but
+// in the docked/menu render path `W_RectFill` is a dStub (no-op) so the buffer is
+// never cleared -> our translucent panels accumulate ("old frame not cleaned up").
+// The overlay never calls glClear itself, so this interpose observes ONLY the
+// game's clears; overlay_draw uses g_force_opaque to draw solid in no-clear frames.
+typedef void (*pfn_Clear)(GLbitfield);
+static pfn_Clear real_Clear = nullptr;
+static volatile bool g_color_cleared = false;  // set by our glClear interpose
+static bool g_force_opaque = false;            // read by the panels this frame
+
 static void resolve_originals(void)
 {
     if (!real_SwapWindow)
@@ -84,6 +94,8 @@ static void resolve_originals(void)
         real_PeepEvents = (pfn_PeepEvents)dlsym(RTLD_NEXT, "SDL_PeepEvents");
     if (!real_PumpEvents)
         real_PumpEvents = (pfn_PumpEvents)dlsym(RTLD_NEXT, "SDL_PumpEvents");
+    if (!real_Clear)
+        real_Clear = (pfn_Clear)dlsym(RTLD_NEXT, "glClear");
 }
 
 // Process gate: the .so is inherited by every process in X3's launch chain, but
@@ -108,6 +120,14 @@ static bool is_game_process(void)
 // ---- overlay state --------------------------------------------------------
 static bool g_inited     = false;
 static bool g_ui_visible = true;   // toggled with ScrollLock
+static SDL_Window  *g_sdl_window = nullptr;   // captured for synthesizing input events (auto-dock)
+static SDL_Event    g_synth[16];              // synthetic events injected into the game's PeepEvents read
+static volatile int g_synth_n = 0;            // count queued by the synthkey harness
+// The game polls SDL_GetKeyboardState (not events) for keys, so we force a key into SDL's
+// STATE array for a few frames inside the SDL_PumpEvents hook (after SDL refreshes state).
+static volatile int g_synth_hold  = 0;        // frames remaining to hold the synthetic key
+static volatile int g_synth_sc    = 0;        // scancode to force down (e.g. SDL_SCANCODE_D)
+static volatile int g_synth_shift = 0;        // also force LSHIFT (for Shift+D = Dock At)
 
 static void overlay_init(SDL_Window *window)
 {
@@ -152,6 +172,7 @@ static void overlay_init(SDL_Window *window)
     ImGui_ImplSDL2_InitForOpenGL(window, ctx);
     ImGui_ImplOpenGL3_Init("#version 130");
 
+    g_sdl_window = window;
     g_inited = true;
     fprintf(stderr, "[x3ui] overlay live (GL3 backend) — ScrollLock toggles\n");
 }
@@ -180,6 +201,42 @@ static void mem_open(void)
 static bool mem_read_i32(uintptr_t addr, int32_t *out)
 {
     return pread(g_memfd, out, sizeof(*out), (off_t)addr) == (ssize_t)sizeof(*out);
+}
+
+// Write path — separate O_RDWR handle on our own /proc/self/mem (we're in-process). pwrite
+// to a bad address returns <0 instead of crashing, same safety model as the pread reads.
+// Used by the command bridge (ship_set_command) to poke the AI command struct.
+static int g_memfd_rw = -1;
+static void mem_open_rw(void)
+{
+    if (g_memfd_rw < 0) g_memfd_rw = open("/proc/self/mem", O_RDWR);
+}
+static bool mem_write_u32(uintptr_t addr, uint32_t v)
+{
+    mem_open_rw();
+    return g_memfd_rw >= 0 && pwrite(g_memfd_rw, &v, 4, (off_t)addr) == 4;
+}
+static bool mem_write_u16(uintptr_t addr, uint16_t v)
+{
+    mem_open_rw();
+    return g_memfd_rw >= 0 && pwrite(g_memfd_rw, &v, 2, (off_t)addr) == 2;
+}
+static bool mem_write_u8(uintptr_t addr, uint8_t v)
+{
+    mem_open_rw();
+    return g_memfd_rw >= 0 && pwrite(g_memfd_rw, &v, 1, (off_t)addr) == 1;
+}
+static bool mem_write_bytes(uintptr_t addr, const void *src, size_t n)
+{
+    mem_open_rw();
+    if (g_memfd_rw < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t r = pwrite(g_memfd_rw, (const char *)src + done, n - done, (off_t)(addr + done));
+        if (r <= 0) return false;
+        done += (size_t)r;
+    }
+    return true;
 }
 
 // Bulk read: one (looped) pread for the whole range — orders of magnitude fewer
@@ -629,6 +686,234 @@ static void state_bridge_window(void)
     ImGui::End();
 }
 
+// ---- get_text_simple EXECUTE-trace: log (page,id,caller) per call, to settle
+// whether the displayed object NAME is composed by engine C or the MSCI VM, and
+// which (computed) text page it queries. A perf HW *execute* breakpoint fires on
+// every get_text_simple(page,id) call on the main thread; a dedicated RT-signal
+// handler reads the cdecl args off the stack at function entry ([esp+4]=page,
+// [esp+8]=id, [esp]=return addr into the caller). Map caller -> Ghidra to see if
+// it's the MSCI string interpreter (VM) or a HUD/menu function (engine).
+static constexpr unsigned long GETTEXT_ADDR = 0x080acd30UL;   // get_text_simple(page,id)
+struct TextCall { uint32_t eip, page, id, caller0, callers[4]; };
+static TextCall      g_tc[4096];
+static volatile int  g_tc_n = 0;          // captured (page-filtered) entries
+static volatile long g_tc_total = 0;      // all hits (incl. filtered-out)
+static int           g_tc_min_page = 100000;  // capture only page >= this (name pages are 301000/30220x)
+static volatile int  g_tc_armed = 0;
+static int           g_trace_fd = -1;
+static int           g_trace_sig = 0;
+
+static void text_trace_handler(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig; (void)si;
+    if (!g_tc_armed) return;
+    ucontext_t *u = (ucontext_t *)uc;
+    const unsigned long *sp = (const unsigned long *)u->uc_mcontext.gregs[REG_ESP];
+    g_tc_total++;
+    if (g_tc_total >= 2000000) {        // hard safety: bound the signal storm
+        g_tc_armed = 0;
+        if (g_trace_fd >= 0) ioctl(g_trace_fd, PERF_EVENT_IOC_DISABLE, 0);
+        return;
+    }
+    uint32_t page = (uint32_t)sp[1], id = (uint32_t)sp[2];   // cdecl: [esp]=ret [esp+4]=page [esp+8]=id
+    if ((int)page < g_tc_min_page) return;
+    int n = g_tc_n;
+    if (n >= (int)(sizeof g_tc / sizeof g_tc[0])) {          // buffer full -> auto-disarm
+        g_tc_armed = 0;
+        if (g_trace_fd >= 0) ioctl(g_trace_fd, PERF_EVENT_IOC_DISABLE, 0);
+        return;
+    }
+    TextCall &e = g_tc[n];
+    e.eip = (uint32_t)u->uc_mcontext.gregs[REG_EIP];
+    e.page = page; e.id = id; e.caller0 = (uint32_t)sp[0];
+    int k = 0;
+    for (int i = 1; i < 40 && k < 4; ++i) {                  // a few more .text return-addrs up-stack
+        unsigned long w = sp[i];
+        if (w >= 0x0804e960 && w <= 0x08190133) e.callers[k++] = (uint32_t)w;
+    }
+    for (; k < 4; ++k) e.callers[k] = 0;
+    g_tc_n = n + 1;
+}
+
+static void arm_text_trace(void)
+{
+    if (g_trace_fd >= 0) { close(g_trace_fd); g_trace_fd = -1; }
+    g_tc_n = 0; g_tc_total = 0;
+    g_trace_sig = SIGRTMIN + 3;
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = text_trace_handler; sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(g_trace_sig, &sa, NULL);
+
+    struct perf_event_attr a; memset(&a, 0, sizeof a);
+    a.type = PERF_TYPE_BREAKPOINT; a.size = sizeof a;
+    a.bp_type = HW_BREAKPOINT_X; a.bp_addr = GETTEXT_ADDR;
+    a.sample_period = 1; a.disabled = 0; a.exclude_kernel = 1; a.exclude_hv = 1;
+    // x86-64 kernels require bp_len == 8 for EXECUTE breakpoints (len 1/2/4 -> EINVAL),
+    // even for a 32-bit task; verified via a perf probe. Try 8 first, then fall back.
+    int lens[3] = { HW_BREAKPOINT_LEN_8, (int)sizeof(long), HW_BREAKPOINT_LEN_1 };
+    int fd = -1, usedlen = 0;
+    for (int li = 0; li < 3 && fd < 0; ++li) {
+        a.bp_len = lens[li]; usedlen = lens[li];
+        fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
+    }
+    if (fd < 0) { fprintf(stderr, "[x3ui] text-trace arm FAILED: %s\n", strerror(errno)); return; }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_ASYNC);
+    fcntl(fd, F_SETSIG, g_trace_sig);
+    struct f_owner_ex ow; ow.type = F_OWNER_TID; ow.pid = (pid_t)syscall(SYS_gettid);
+    fcntl(fd, F_SETOWN_EX, &ow);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+    g_trace_fd = fd; g_tc_armed = 1;
+    fprintf(stderr, "[x3ui] text-trace armed @0x%08lx (sig %d, len %d)\n",
+            GETTEXT_ADDR, g_trace_sig, usedlen);
+}
+
+// Dump the captured calls to a file (main-thread; fopen is fine here, never in the
+// signal handler) so the controller can read exact pages + caller addresses.
+static void dump_text_trace(void)
+{
+    FILE *f = fopen("/tmp/x3_texttrace.tsv", "w");
+    if (!f) { fprintf(stderr, "[x3ui] text-trace dump: fopen failed\n"); return; }
+    fprintf(f, "# page\tid\tcaller_ret\tstack_callers   (total=%ld captured=%d min_page=%d)\n",
+            g_tc_total, g_tc_n, g_tc_min_page);
+    for (int i = 0; i < g_tc_n; ++i) {
+        const TextCall &e = g_tc[i];
+        fprintf(f, "%u\t%u\t0x%08x\t", e.page, e.id, e.caller0);
+        for (int k = 0; k < 4 && e.callers[k]; ++k) fprintf(f, "0x%08x ", e.callers[k]);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    fprintf(stderr, "[x3ui] text-trace dumped %d rows -> /tmp/x3_texttrace.tsv\n", g_tc_n);
+}
+
+static void disarm_text_trace(void)
+{
+    g_tc_armed = 0;
+    if (g_trace_fd >= 0) { ioctl(g_trace_fd, PERF_EVENT_IOC_DISABLE, 0); close(g_trace_fd); g_trace_fd = -1; }
+    dump_text_trace();
+}
+
+// ---- generic execute-trace: capture a function's call args (ret + 7 args) at entry --------
+struct ExecCall { uint32_t w[32]; uint32_t r[7]; };  // w[0]=ret w[1..]=stack words (scan code-range = call chain); r=eax,ebx,ecx,edx,esi,edi,ebp
+static ExecCall      g_ec[256];
+static volatile int  g_ec_n = 0;
+static volatile long g_ec_total = 0;
+static volatile int  g_ec_armed = 0;
+static int           g_ec_fd = -1;
+static uint32_t      g_ec_filter = 0;  // only log calls where some arg/reg == filter (0 = log all)
+
+static void exec_trace_handler(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig; (void)si;
+    if (!g_ec_armed) return;
+    ucontext_t *u = (ucontext_t *)uc;
+    const unsigned long *sp = (const unsigned long *)u->uc_mcontext.gregs[REG_ESP];
+    g_ec_total++;
+    if (g_ec_total >= 5000000) { g_ec_armed = 0; if (g_ec_fd >= 0) ioctl(g_ec_fd, PERF_EVENT_IOC_DISABLE, 0); return; }
+    uint32_t regs[7] = { (uint32_t)u->uc_mcontext.gregs[REG_EAX], (uint32_t)u->uc_mcontext.gregs[REG_EBX],
+                         (uint32_t)u->uc_mcontext.gregs[REG_ECX], (uint32_t)u->uc_mcontext.gregs[REG_EDX],
+                         (uint32_t)u->uc_mcontext.gregs[REG_ESI], (uint32_t)u->uc_mcontext.gregs[REG_EDI],
+                         (uint32_t)u->uc_mcontext.gregs[REG_EBP] };
+    if (g_ec_filter) {
+        bool match = false;
+        for (int i = 1; i <= 24 && !match; ++i) if ((uint32_t)sp[i] == g_ec_filter) match = true;
+        for (int i = 0; i < 7 && !match; ++i) if (regs[i] == g_ec_filter) match = true;
+        if (!match) return;
+    }
+    int n = g_ec_n;
+    if (n >= 256) { g_ec_armed = 0; if (g_ec_fd >= 0) ioctl(g_ec_fd, PERF_EVENT_IOC_DISABLE, 0); return; }
+    for (int i = 0; i < 32; ++i) g_ec[n].w[i] = (uint32_t)sp[i];
+    for (int i = 0; i < 7; ++i) g_ec[n].r[i] = regs[i];
+    g_ec_n = n + 1;
+}
+
+static std::string overlay_exectrace(uint32_t addr, uint32_t filter)
+{
+    if (addr == 0) {                                   // addr 0 = disarm + dump
+        g_ec_armed = 0;
+        if (g_ec_fd >= 0) { ioctl(g_ec_fd, PERF_EVENT_IOC_DISABLE, 0); close(g_ec_fd); g_ec_fd = -1; }
+        char b[200];
+        snprintf(b, sizeof b, "ok exectrace total=%ld captured=%d\n", g_ec_total, g_ec_n);
+        std::string r = b;
+        for (int i = 0; i < g_ec_n; ++i) {
+            snprintf(b, sizeof b, "[%d] ret=%08x a0=%08x a1=%08x a2=%08x a3=%08x a4=%08x a5=%08x a6=%08x | "
+                     "eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x\n",
+                     i, g_ec[i].w[0], g_ec[i].w[1], g_ec[i].w[2], g_ec[i].w[3],
+                     g_ec[i].w[4], g_ec[i].w[5], g_ec[i].w[6], g_ec[i].w[7],
+                     g_ec[i].r[0], g_ec[i].r[1], g_ec[i].r[2], g_ec[i].r[3], g_ec[i].r[4], g_ec[i].r[5], g_ec[i].r[6]);
+            r += b;
+            r += "    bt:";  // code-range stack values = return-address call chain (outermost UI caller last)
+            for (int k = 0; k < 32; ++k) {
+                uint32_t v = g_ec[i].w[k];
+                if (v >= 0x08049000u && v < 0x08300000u) { snprintf(b, sizeof b, " %08x", v); r += b; }
+            }
+            r += "\n";
+        }
+        return r;
+    }
+    if (g_ec_fd >= 0) { close(g_ec_fd); g_ec_fd = -1; }
+    g_ec_n = 0; g_ec_total = 0; g_ec_filter = filter;
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = exec_trace_handler; sa.sa_flags = SA_SIGINFO | SA_RESTART; sigemptyset(&sa.sa_mask);
+    sigaction(SIGRTMIN + 4, &sa, NULL);
+    struct perf_event_attr a; memset(&a, 0, sizeof a);
+    a.type = PERF_TYPE_BREAKPOINT; a.size = sizeof a;
+    a.bp_type = HW_BREAKPOINT_X; a.bp_addr = addr;
+    a.sample_period = 1; a.disabled = 0; a.exclude_kernel = 1; a.exclude_hv = 1;
+    int lens[3] = { HW_BREAKPOINT_LEN_8, (int)sizeof(long), HW_BREAKPOINT_LEN_1 };
+    int fd = -1;
+    for (int li = 0; li < 3 && fd < 0; ++li) { a.bp_len = lens[li]; fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0); }
+    if (fd < 0) { char b[80]; snprintf(b, sizeof b, "err exectrace arm: %s", strerror(errno)); return b; }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_ASYNC);
+    fcntl(fd, F_SETSIG, SIGRTMIN + 4);
+    struct f_owner_ex ow; ow.type = F_OWNER_TID; ow.pid = (pid_t)syscall(SYS_gettid);
+    fcntl(fd, F_SETOWN_EX, &ow);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+    g_ec_fd = fd; g_ec_armed = 1;
+    char b[96]; snprintf(b, sizeof b, "ok exectrace armed @0x%08x filter=0x%x", addr, filter); return b;
+}
+
+static void text_trace_window(void)
+{
+    if (!ImGui::Begin("x3ui - text trace")) { ImGui::End(); return; }
+    ImGui::TextWrapped("execute-trace get_text_simple@0x080acd30 -> (page,id,caller). "
+                       "Arm, THEN target a ship in-game (so the name composes while armed), "
+                       "then Disarm. caller(ret) -> Ghidra tells engine-C vs MSCI-VM.");
+    ImGui::SetNextItemWidth(120); ImGui::InputInt("min page (capture)", &g_tc_min_page);
+    if (!g_tc_armed) { if (ImGui::Button("Arm"))    arm_text_trace(); }
+    else             { if (ImGui::Button("Disarm")) disarm_text_trace(); }
+    ImGui::SameLine(); if (ImGui::Button("Clear")) { g_tc_n = 0; g_tc_total = 0; }
+    ImGui::SameLine(); if (ImGui::Button("Dump file")) dump_text_trace();
+    ImGui::SameLine(); ImGui::Text("armed=%d  total=%ld  captured=%d",
+                                   (int)g_tc_armed, g_tc_total, g_tc_n);
+    if (g_tc_n && g_tc[0].eip != (uint32_t)GETTEXT_ADDR)
+        ImGui::TextColored(ImVec4(1,0.55f,0.2f,1),
+                           "skid: eip[0]=0x%08x != 0x%08lx (args may be off-by-prologue)",
+                           g_tc[0].eip, GETTEXT_ADDR);
+    ImGui::Separator();
+    if (ImGui::BeginTable("tc", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_RowBg, ImVec2(0, 360))) {
+        ImGui::TableSetupColumn("page"); ImGui::TableSetupColumn("id");
+        ImGui::TableSetupColumn("caller(ret)"); ImGui::TableSetupColumn("stack .text callers");
+        ImGui::TableSetupScrollFreeze(0, 1); ImGui::TableHeadersRow();
+        int n = g_tc_n; if (n > 600) n = 600;
+        for (int i = 0; i < n; ++i) {
+            const TextCall &e = g_tc[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("%u", e.page);
+            ImGui::TableNextColumn(); ImGui::Text("%u", e.id);
+            ImGui::TableNextColumn(); ImGui::Text("0x%08x", e.caller0);
+            ImGui::TableNextColumn();
+            char b[160]; int o = 0; b[0] = 0;
+            for (int k = 0; k < 4 && e.callers[k]; ++k)
+                o += snprintf(b + o, (size_t)((int)sizeof b - o), "%08x ", e.callers[k]);
+            ImGui::TextUnformatted(b);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
 // Live view of the player SHIP object, reached via the fixed global
 // (ship = *(*0x0837a0d0 + 0x38)). Shows each dword as int + float so we can
 // spot plain C++ fields (position floats, hull/shield/speed ints) by watching
@@ -694,13 +979,40 @@ static int g_credits  = -999;   // last credits read via MSCI
 // Find our custom script's class id by probing for its unique entry name.
 static int msci_find_id(const char *entry)
 {
-    for (int id = 0; id < 0x800; ++id)
+    for (int id = 0; id < 0x8000; ++id)             // widened from 0x800 to catch AI-command scripts
         if (script_exists(id, entry)) return id;
     return -1;
 }
 
 // Production Mem: read the game's own address space via /proc/self/mem (the same
 // safe pread path the scanners use — bad addresses return false, never crash).
+static std::string overlay_issue_dock(uint32_t station, int cmd, int bay, int notify, int destmode);  // below
+static std::string overlay_dockscript(uint32_t station, int thismode);  // below
+static std::string overlay_runscript(std::string name, uint32_t thisH, uint32_t arg, int argc, int sync);  // below
+static std::string overlay_runscript2(std::string name, uint32_t thisH, const std::vector<uint32_t>& a, int sync);  // below
+static std::string overlay_jumpgate(uint32_t gate, int overshoot_km);  // below
+static std::string overlay_cmdengage(uint32_t target, int op, int argc, int bay, int clear200);  // below
+static std::string overlay_setcmd(int cmd);  // below
+static std::string overlay_watchwrite(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3);  // below
+static std::string overlay_watchip(void);  // below
+static std::string overlay_drive(int on, int rearm);  // below
+static std::string overlay_dockdrive(uint32_t station, int op, int bay, int on);  // below
+static std::string overlay_callfn1(uint32_t addr, uint32_t arg);  // below
+static std::string overlay_callfn3(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2);  // below
+static std::string overlay_sacall(int subcmd, int argc, uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3);  // below
+static std::string overlay_poke(uint32_t addr, uint32_t val);  // below
+static std::string overlay_tracedock(uint32_t cmdId, uint32_t traceAddr);  // below
+static std::string overlay_spawnorch(uint32_t station, int stage);  // below
+static std::string overlay_settarget(uint32_t target_addr);  // below
+static std::string overlay_synthkey(int scancode, int sym, int mod, int down);  // below
+static std::string overlay_synthhold(int sc, int shift, int frames);  // below
+static std::string overlay_synthdiag(void);  // below
+static std::string overlay_taskid(uint32_t handle);  // below
+static std::string overlay_spawn(uint32_t scriptKey, std::string entry, uint32_t thisId, uint32_t arg, int argc);  // below
+static std::string overlay_dock2(uint32_t station, std::string name, uint32_t ctxOvr, uint32_t keyOvr);  // below
+static std::string overlay_vmdock(uint32_t station, int do_op10);  // below
+static std::string overlay_natdock(uint32_t station, int stage);  // below
+
 static x3::Mem make_engine_mem(void)
 {
     x3::Mem m;
@@ -744,6 +1056,53 @@ static x3::Mem make_engine_mem(void)
         cache.emplace(key, out);
         return out;
     };
+    // Self-test harness: `x3dbg dock <station>` issues a guarded player dock (writes + engine
+    // call) — runs in the debug pump on the main thread between frames, so it's call-safe.
+    m.issue_dock = [](uint32_t station, int cmd, int bay, int notify, int dmode) -> std::string {
+        return overlay_issue_dock(station, cmd, bay, notify, dmode);
+    };
+    m.dockscript = [](uint32_t station, int thismode) -> std::string {
+        return overlay_dockscript(station, thismode);
+    };
+    m.runscript = [](std::string name, uint32_t thisH, uint32_t arg, int argc, int sync) -> std::string {
+        return overlay_runscript(name, thisH, arg, argc, sync);
+    };
+    m.runscript2 = [](std::string name, uint32_t thisH, std::vector<uint32_t> a, int sync) -> std::string {
+        return overlay_runscript2(name, thisH, a, sync);
+    };
+    m.jumpgate = [](uint32_t gate, int overshoot) -> std::string {
+        return overlay_jumpgate(gate, overshoot);
+    };
+    m.cmdengage = [](uint32_t target, int op, int argc, int bay, int clear200) -> std::string {
+        return overlay_cmdengage(target, op, argc, bay, clear200);
+    };
+    m.setcmd = [](int cmd) -> std::string { return overlay_setcmd(cmd); };
+    m.watchwrite = [](uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) -> std::string {
+        return overlay_watchwrite(a0, a1, a2, a3);
+    };
+    m.watchip = []() -> std::string { return overlay_watchip(); };
+    m.drive = [](int on, int rearm) -> std::string { return overlay_drive(on, rearm); };
+    m.dockdrive = [](uint32_t station, int op, int bay, int on) -> std::string { return overlay_dockdrive(station, op, bay, on); };
+    m.callfn1 = [](uint32_t addr, uint32_t arg) -> std::string { return overlay_callfn1(addr, arg); };
+    m.callfn3 = [](uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2) -> std::string { return overlay_callfn3(addr, a0, a1, a2); };
+    m.sacall = [](int subcmd, int argc, uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3) -> std::string { return overlay_sacall(subcmd, argc, c0, c1, c2, c3); };
+    m.poke = [](uint32_t addr, uint32_t val) -> std::string { return overlay_poke(addr, val); };
+    m.tracedock = [](uint32_t cmdId, uint32_t traceAddr) -> std::string { return overlay_tracedock(cmdId, traceAddr); };
+    m.spawnorch = [](uint32_t station, int stage) -> std::string { return overlay_spawnorch(station, stage); };
+    m.settarget = [](uint32_t t) -> std::string { return overlay_settarget(t); };
+    m.synthkey = [](int sc, int sym, int mod, int down) -> std::string { return overlay_synthkey(sc, sym, mod, down); };
+    m.synthhold = [](int sc, int shift, int frames) -> std::string { return overlay_synthhold(sc, shift, frames); };
+    m.synthdiag = []() -> std::string { return overlay_synthdiag(); };
+    m.taskid = [](uint32_t handle) -> std::string { return overlay_taskid(handle); };
+    m.spawn = [](uint32_t key, std::string entry, uint32_t thisId, uint32_t arg, int argc) -> std::string {
+        return overlay_spawn(key, entry, thisId, arg, argc);
+    };
+    m.dock2 = [](uint32_t station, std::string name, uint32_t ctxOvr, uint32_t keyOvr) -> std::string {
+        return overlay_dock2(station, name, ctxOvr, keyOvr);
+    };
+    m.vmdock = [](uint32_t station, int do_op10) -> std::string { return overlay_vmdock(station, do_op10); };
+    m.natdock = [](uint32_t station, int stage) -> std::string { return overlay_natdock(station, stage); };
+    m.exectrace = [](uint32_t addr, uint32_t filter) -> std::string { return overlay_exectrace(addr, filter); };
     return m;
 }
 
@@ -826,11 +1185,1059 @@ static void select_target(const x3::ObjInfo& o)
     }
 }
 
+// THE working player auto-dock: target the object (HUD lock), then fire the game's own
+// "Dock At" key (Shift+D = cmdId 0x1064) via its input dispatcher — this spawns the bound
+// !ship.cmd.movestation.std orchestrator with [THIS]=player, which flies the full multi-leg
+// dock. Verified live: ship docks end-to-end. (input_dispatch_key_script@0x08053690.)
+static void player_dock_input(const x3::ObjInfo& o)
+{
+    if (!o.addr) return;
+    select_target(o);                                  // HUD target = the station (Dock At acts on it)
+    typedef void (__attribute__((cdecl)) *keydisp_t)(unsigned);
+    ((keydisp_t)(uintptr_t)0x08053690u)(0x1064u);      // Shift+D ("Dock At") through the real input path
+}
+
+// ---- command bridge: order a ship to dock/move/attack an object -------------
+// The player's own ship (the one being flown), via the scene global.
+static uint32_t player_ship_addr(void)
+{
+    x3::Mem m = make_engine_mem();
+    uint32_t scene = 0, ship = 0;
+    if (m.u32(x3::off::SCENE_GLOBAL, scene) && scene)
+        m.u32(scene + x3::off::SCENE_PLAYER_ANCHOR, ship);
+    return ship;
+}
+
+// Diagnostics for the last command write — so we can confirm IN-PROCESS (no flaky socket)
+// that the write landed at the right offset (readback==wrote).
+static uint32_t g_cmd_dbg_ship = 0, g_cmd_dbg_payload = 0, g_cmd_dbg_target = 0;
+static int      g_cmd_dbg_wrote = -1, g_cmd_dbg_readback = -1;
+
+// Engage the PLAYER ship's autopilot toward `target` — writes the full command struct on the
+// payload exactly as the validated-DOCKAT engage block (@0x0811cb14) / MOVE-FLYTO handler
+// (@0x08123250) do: command id @+0xC4, target @+0x98, the navigation DESTINATION @+0xAC/B0/B4
+// (THE field our earlier zeros broke — fly-to: the target's world pos; the bound !move.* MSCI
+// script then navigates to it with avoidance), start-time @+0x84, the command-active handle
+// ship+0x78=1, and for dock the family index @+0xC0=9 + a bay @+0xBC. obj+0x40 NOT touched
+// (bit19 is set by default). See memory x3-ship-set-command. Crash-safe (pwrite).
+static void player_autopilot(uint32_t ship, int16_t cmdId, uint32_t target)
+{
+    g_cmd_dbg_ship = ship; g_cmd_dbg_target = target; g_cmd_dbg_wrote = cmdId;
+    g_cmd_dbg_payload = 0;  g_cmd_dbg_readback = -1;
+    if (!ship) return;
+    int32_t cls = 0, plw = 0;
+    if (!mem_read_i32(ship + x3::off::OBJ_TYPE, &cls) ||
+        (int16_t)(cls & 0xFFFF) != x3::off::TYPE_SHIP) return;
+    if (!mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &plw) || (uint32_t)plw < 0x08000000u) return;
+    uint32_t pl = (uint32_t)plw; g_cmd_dbg_payload = pl;
+    int32_t rc = 0, now = 0;
+    if (mem_read_i32(x3::off::RENDER_CONFIG, &rc) && rc)
+        mem_read_i32((uint32_t)rc + x3::off::RENDER_CFG_TIME, &now);
+    int32_t dest[3] = { 0, 0, 0 };                                    // dest = target world pos (safe;
+    int32_t ttf = 0;                                                  // calling the engine dock-approach
+    if (target && mem_read_i32(target + x3::off::OBJ_TRANSFORM, &ttf) && ttf) {  // fn @0x08104ff0 crashed,
+        mem_read_i32((uint32_t)ttf + x3::off::TF_X, &dest[0]);        // it assumes a full bay setup we
+        mem_read_i32((uint32_t)ttf + x3::off::TF_Y, &dest[1]);        // can't safely provide from here)
+        mem_read_i32((uint32_t)ttf + x3::off::TF_Z, &dest[2]);
+    }
+    mem_write_u32(pl + x3::off::SHIP_CMD_TARGET,   target);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 0, (uint32_t)dest[0]); // <-- the destination
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 4, (uint32_t)dest[1]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 8, (uint32_t)dest[2]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_STARTTIME, (uint32_t)now);
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_OBJ, 0);                 // no completion-notify hook
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_VAL, 0);
+    { int32_t fl = 0;                                                  // OPEN THE GATE: the per-frame
+      if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl))                // command executor only runs a
+          mem_write_u32(ship + x3::off::OBJ_FLAGS,                     // ship's command if obj+0x40
+                        (uint32_t)fl | x3::off::AUTOPILOT_ENGAGED); }  // bit19 is set (manual/"Stop" clears it)
+    if (cmdId == x3::off::CMD_DOCKAT) {                                // DECOMPILED case-4 (DOCK): with
+        mem_write_u32(pl + x3::off::SHIP_CMD_FAMILY, 0);               // bay==-1 the executor reads +0xAC as
+        mem_write_u32(pl + x3::off::SHIP_CMD_BAY, (uint32_t)-1);       // a LITERAL world point (station ctr)
+    }                                                                 // and runs the real dock state machine
+    //  (cmd 4<->5 + dock_select_bay_node) itself. bay>=0 would mis-transform +0xAC by station orient -> the
+    //  ship flew to a garbage point ~10km out. family +0xC0 is bookkeeping (executor ignores it).
+    mem_write_u16(pl + x3::off::SHIP_CMD_ID, (uint16_t)cmdId);         // LAST → script starts
+    int32_t back = 0;
+    if (mem_read_i32(pl + x3::off::SHIP_CMD_ID, &back)) g_cmd_dbg_readback = back & 0xFFFF;
+}
+static void player_autopilot_cancel(uint32_t ship)
+{
+    g_cmd_dbg_wrote = 0; g_cmd_dbg_readback = -1;
+    int32_t plw = 0;
+    if (ship && mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &plw) && (uint32_t)plw >= 0x08000000u) {
+        mem_write_u16((uint32_t)plw + x3::off::SHIP_CMD_ID, x3::off::CMD_NONE);  // cmd 0 = idle/decel
+        mem_write_u32(ship + x3::off::SHIP_NOTIFY_OBJ, 0);
+        int32_t fl = 0;                                             // DISENGAGE = clear bit19 (decompiled
+        if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl))           // truth: player_input_flight_handler
+            mem_write_u32(ship + x3::off::OBJ_FLAGS,                // @0x0805ad8b does exactly flags&=~0x80000.
+                          (uint32_t)fl & ~x3::off::AUTOPILOT_ENGAGED); // bit19 clear -> arrival physics
+    }                                                              // reclaims the ship -> stops + manual.
+}
+
+// Auto-dock the PLAYER ship at `station` — PARAMETERIZED for the live experiment harness. The
+// engine helper dock_compute_approach_for_bay@0x08104ff0 reliably CRASHES when called standalone
+// (deep nested bay-slot struct walks fault outside the reserved-bay context — 2 crashes), so we do
+// NOT call it. We write only the command struct (dest = station world center) and sweep the dock-
+// distinguishing fields — cmd id (4 DOCK / 5 FLYTO), bay (a real index drives the executor into the
+// bay; -1 = literal world point), notify (ship+0x78, 1 on every real mid-dock NPC) — to find which
+// combo makes the executor's case-4/5 actually enter. Crash-safe writes (pwrite). Returns status.
+static std::string player_dock(uint32_t ship, uint32_t station, int cmd, int bay, int notify, int destmode)
+{
+    mem_open_rw();
+    char buf[200];
+    if (!ship || !station) return "err no ship/station";
+    int32_t cls = 0, shipPl = 0;
+    if (!mem_read_i32(ship + x3::off::OBJ_TYPE, &cls) || (int16_t)(cls & 0xFFFF) != x3::off::TYPE_SHIP)
+        return "err ship not class 7";
+    if (!mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &shipPl) || (uint32_t)shipPl < 0x08000000u)
+        return "err ship payload";
+    int32_t stcls = 0;
+    if (!mem_read_i32(station + x3::off::OBJ_TYPE, &stcls)) return "err station type";
+    int16_t st = (int16_t)(stcls & 0xFFFF);
+    if (st != x3::off::TYPE_STATION && st != x3::off::TYPE_FACTORY) return "err not a station";
+    // destmode: 0 = station world center (literal world point, for bay=-1);
+    //           1 = (0,0,0)  (bay-local zero -> transforms to station center when bay>=0);
+    //           2 = ship's current world pos.
+    int32_t dest[3] = { 0, 0, 0 };
+    if (destmode == 0) {
+        int32_t tf = 0;
+        if (mem_read_i32(station + x3::off::OBJ_TRANSFORM, &tf) && tf) {
+            mem_read_i32((uint32_t)tf + x3::off::TF_X, &dest[0]);
+            mem_read_i32((uint32_t)tf + x3::off::TF_Y, &dest[1]);
+            mem_read_i32((uint32_t)tf + x3::off::TF_Z, &dest[2]);
+        }
+    } else if (destmode == 2) {
+        int32_t tf = 0;
+        if (mem_read_i32(ship + x3::off::OBJ_TRANSFORM, &tf) && tf) {
+            mem_read_i32((uint32_t)tf + x3::off::TF_X, &dest[0]);
+            mem_read_i32((uint32_t)tf + x3::off::TF_Y, &dest[1]);
+            mem_read_i32((uint32_t)tf + x3::off::TF_Z, &dest[2]);
+        }
+    }   // destmode 1 leaves dest = (0,0,0)
+    uint32_t pl = (uint32_t)shipPl;
+    int32_t rc = 0, now = 0;
+    if (mem_read_i32(x3::off::RENDER_CONFIG, &rc) && rc)
+        mem_read_i32((uint32_t)rc + x3::off::RENDER_CFG_TIME, &now);
+    mem_write_u32(pl + x3::off::SHIP_CMD_TARGET,   station);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 0, (uint32_t)dest[0]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 4, (uint32_t)dest[1]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 8, (uint32_t)dest[2]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_BAY,    (uint32_t)bay);
+    mem_write_u32(pl + x3::off::SHIP_CMD_FAMILY, 0);
+    mem_write_u32(pl + x3::off::SHIP_CMD_STARTTIME, (uint32_t)now);
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_OBJ, (uint32_t)notify);
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_VAL, 0);
+    { int32_t fl = 0; if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl))
+          mem_write_u32(ship + x3::off::OBJ_FLAGS, (uint32_t)fl | x3::off::AUTOPILOT_ENGAGED); }
+    mem_write_u16(pl + x3::off::SHIP_CMD_ID, (uint16_t)cmd);           // cmd LAST
+    g_cmd_dbg_ship = ship; g_cmd_dbg_payload = pl; g_cmd_dbg_target = station;
+    g_cmd_dbg_wrote = cmd;
+    int32_t back = 0; if (mem_read_i32(pl + x3::off::SHIP_CMD_ID, &back)) g_cmd_dbg_readback = back & 0xFFFF;
+    snprintf(buf, sizeof buf, "ok dock ship=0x%08x st=0x%08x cmd=%d bay=%d notify=%d dmode=%d dest=%d,%d,%d",
+             ship, station, cmd, bay, notify, destmode, dest[0], dest[1], dest[2]);
+    return buf;
+}
+
+// Debug-harness entry: `dock <station> [cmd=4] [bay=-1] [notify=0] [destmode=0]` -> dock PLAYER ship.
+static std::string overlay_issue_dock(uint32_t station, int cmd, int bay, int notify, int destmode)
+{
+    return player_dock(player_ship_addr(), station, cmd, bay, notify, destmode);
+}
+
+// Fly the PLAYER ship THROUGH a gate. A gate jump is PROXIMITY-triggered (no bay tunnel like dock),
+// so unlike "fly to gate" (which stops at the ~2.9km object-arrival standoff) we issue a MOVE-TO-
+// POSITION (cmd 0x19, no object arrival) to a point `overshoot_km` PAST the gate along the ship->gate
+// line — the ship flies straight through the gate ring, tripping the jump mid-flight. Crash-safe.
+static std::string player_jumpgate(uint32_t ship, uint32_t gate, int overshoot_km)
+{
+    mem_open_rw();
+    char buf[192];
+    if (!ship || !gate) return "err no ship/gate";
+    int32_t cls = 0, plw = 0;
+    if (!mem_read_i32(ship + x3::off::OBJ_TYPE, &cls) || (int16_t)(cls & 0xFFFF) != x3::off::TYPE_SHIP)
+        return "err ship not class 7";
+    if (!mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &plw) || (uint32_t)plw < 0x08000000u)
+        return "err ship payload";
+    int32_t gtf = 0, stf = 0, gp[3] = {0,0,0}, sp[3] = {0,0,0};
+    if (mem_read_i32(gate + x3::off::OBJ_TRANSFORM, &gtf) && gtf) {
+        mem_read_i32((uint32_t)gtf + x3::off::TF_X, &gp[0]);
+        mem_read_i32((uint32_t)gtf + x3::off::TF_Y, &gp[1]);
+        mem_read_i32((uint32_t)gtf + x3::off::TF_Z, &gp[2]);
+    }
+    if (mem_read_i32(ship + x3::off::OBJ_TRANSFORM, &stf) && stf) {
+        mem_read_i32((uint32_t)stf + x3::off::TF_X, &sp[0]);
+        mem_read_i32((uint32_t)stf + x3::off::TF_Y, &sp[1]);
+        mem_read_i32((uint32_t)stf + x3::off::TF_Z, &sp[2]);
+    }
+    double dx = (double)gp[0]-sp[0], dy = (double)gp[1]-sp[1], dz = (double)gp[2]-sp[2];
+    double len = sqrt(dx*dx + dy*dy + dz*dz); if (len < 1) len = 1;
+    double over = (double)overshoot_km * 500000.0;                    // 1km = 500000 units
+    int32_t dest[3] = { (int32_t)(gp[0] + dx/len*over),
+                        (int32_t)(gp[1] + dy/len*over),
+                        (int32_t)(gp[2] + dz/len*over) };
+    uint32_t pl = (uint32_t)plw;
+    int32_t rc = 0, now = 0;
+    if (mem_read_i32(x3::off::RENDER_CONFIG, &rc) && rc)
+        mem_read_i32((uint32_t)rc + x3::off::RENDER_CFG_TIME, &now);
+    mem_write_u32(pl + x3::off::SHIP_CMD_TARGET,   0);                 // position move, no object target
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 0, (uint32_t)dest[0]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 4, (uint32_t)dest[1]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_DEST + 8, (uint32_t)dest[2]);
+    mem_write_u32(pl + x3::off::SHIP_CMD_BAY,    (uint32_t)-1);
+    mem_write_u32(pl + x3::off::SHIP_CMD_FAMILY, 0);
+    mem_write_u32(pl + x3::off::SHIP_CMD_STARTTIME, (uint32_t)now);
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_OBJ, 0);
+    mem_write_u32(ship + x3::off::SHIP_NOTIFY_VAL, 0);
+    { int32_t fl = 0; if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl))
+          mem_write_u32(ship + x3::off::OBJ_FLAGS, (uint32_t)fl | x3::off::AUTOPILOT_ENGAGED); }
+    mem_write_u16(pl + x3::off::SHIP_CMD_ID, (uint16_t)x3::off::CMD_MOVE_POS);   // cmd 0x19, LAST
+    snprintf(buf, sizeof buf, "ok jumpgate ship=0x%08x gate=0x%08x over=%dkm dest=%d,%d,%d",
+             ship, gate, overshoot_km, dest[0], dest[1], dest[2]);
+    return buf;
+}
+
+// Debug-harness entry: `jumpgate <gate> [overshoot_km=4]` -> fly the PLAYER ship through the gate.
+static std::string overlay_jumpgate(uint32_t gate, int overshoot_km)
+{
+    return player_jumpgate(player_ship_addr(), gate, overshoot_km <= 0 ? 4 : overshoot_km);
+}
+
+// Scene id of an object (the key scene_lookup_object_by_id resolves) = obj+0x08 (the live "id=").
+// (obj+0x28 reads 0 live — the savegame-serializer field the RE pass cited is not the runtime id.)
+static int32_t obj_scene_id(uint32_t obj)
+{
+    int32_t id = 0; mem_read_i32(obj + x3::off::OBJ_ID, &id); return id;
+}
+
+// THE REAL AUTOPILOT: call the engine's command-ENGAGE `msci_native_operator_dispatch`@0x08116850 on
+// the player ship. Unlike struct-poke (one straight leg, no avoidance), the engage builds the engine's
+// own multi-leg nav path WITH collision-avoidance / dock-tunnel / gate-corridor. Operands = a flat VM
+// buffer of 5-byte slots [tag byte][int32 LE]: slot0=ship scene-id, slot1=target scene-id, slot3=bay.
+// op 9 = fly-to-with-avoidance (cmd5), op 10 = DOCK (cmd4, sets bay context safely), op16/30 = move.
+// p1=0x7FFFFFFF (>=0x20) and p2=&{,,0} make the completion-notify a no-op. Then open the executor gate
+// (bit19; optionally clear bit9 manual-direct). Crash-safe vs the bare dock helper — op-10 self-guards.
+static std::string player_cmdengage(uint32_t ship, uint32_t target, int op, int argc, int bay, int clear200)
+{
+    mem_open_rw();
+    char buf[224];
+    if (!ship || !target) return "err no ship/target";
+    int32_t cls = 0;
+    if (!mem_read_i32(ship + x3::off::OBJ_TYPE, &cls) || (int16_t)(cls & 0xFFFF) != x3::off::TYPE_SHIP)
+        return "err ship not class 7";
+    int32_t shipId = obj_scene_id(ship), tgtId = obj_scene_id(target);
+    uint8_t args[32]; for (int i = 0; i < 32; ++i) args[i] = 0;
+    auto put = [&](int k, uint8_t tag, int32_t v) {            // slot k: tag@5k, int32 LE @5k+1
+        args[5*k] = tag;
+        args[5*k+1] = (uint8_t)v;        args[5*k+2] = (uint8_t)(v >> 8);
+        args[5*k+3] = (uint8_t)(v >> 16); args[5*k+4] = (uint8_t)(v >> 24);
+    };
+    put(0, 4, shipId);                                          // slot0 = acting SHIP
+    put(1, 4, tgtId);                                           // slot1 = TARGET object
+    if (argc > 2) put(2, 4, bay);                               // slot2 = dock BAY (handler reads args[2])
+    if (argc > 3) put(3, 4, (op == 9 || op == 10) ? (int)x3::off::CMD_FAMILY_DOCK : -1);  // slot3 = FAMILY (DOCK=9)
+    int32_t p2buf[3] = { 0, 0, 0 };                            // *(p2+8)=0 -> ship+0x7C=0, notify off
+    typedef int (__attribute__((cdecl)) *dispatch_t)(void*, void*, int, int, void*);
+    int ret = ((dispatch_t)0x08116850u)((void*)0x7FFFFFFF, (void*)p2buf, op, argc, args);
+    { int32_t fl = 0; if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl)) {   // open executor gate
+          uint32_t nf = (uint32_t)fl | x3::off::AUTOPILOT_ENGAGED;          // bit19
+          if (clear200) nf &= ~0x200u;                                      // bit9 manual-direct
+          mem_write_u32(ship + x3::off::OBJ_FLAGS, nf); } }
+    int32_t plw = 0, backcmd = -1;
+    if (mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &plw) && (uint32_t)plw >= 0x08000000u)
+        mem_read_i32((uint32_t)plw + x3::off::SHIP_CMD_ID, &backcmd);
+    snprintf(buf, sizeof buf,
+             "ok cmdengage op=%d argc=%d ship=0x%08x(id=%d) tgt=0x%08x(id=%d) bay=%d ret=%d -> cmd(C4)=%d",
+             op, argc, ship, shipId, target, tgtId, bay, ret, backcmd & 0xFFFF);
+    return buf;
+}
+static std::string overlay_cmdengage(uint32_t target, int op, int argc, int bay, int clear200)
+{
+    return player_cmdengage(player_ship_addr(), target, op, argc, bay, clear200);
+}
+
+// Per-frame autopilot DRIVER: the executor only processes a ship while (obj+0x40 & 0x8000200)==0,
+// but physics re-sets bit27 (0x8000000 idle) on each leg-arrival — far faster than a 1Hz socket FSM
+// can clear it. So clear it EVERY FRAME here (from the SwapWindow hook) to keep the executor advancing
+// the player ship's command like an NPC. g_drive_rearm>0 also re-arms cmd if the executor completes it.
+static volatile bool g_drive_on    = false;
+static volatile int  g_drive_rearm = 0;     // cmd to PIN every frame (prevents executor completing+abandoning)
+static volatile int  g_drive_bay   = -2;    // bay to PIN (-2 = don't pin)
+// Per-frame DOCK driver: re-issue SA subcmd op (10=FlyBeforeContainer approach, 9=FlyIntoContainer
+// entry) on the player every frame toward g_dock_drive_target, the way an NPC's command script does.
+static volatile uint32_t g_dock_drive_target = 0;   // station addr, 0 = off
+static volatile int      g_dock_drive_op     = 10;
+static volatile int      g_dock_drive_bay    = 0;   // bay arg (slot2); 0 approaches, -1 overshoots
+static std::string player_cmdengage(uint32_t ship, uint32_t target, int op, int argc, int bay, int clear200);  // fwd
+static void drive_tick(void)
+{
+    if (!g_drive_on && !g_dock_drive_target) return;
+    int32_t scene = 0, ship = 0;
+    if (!mem_read_i32(x3::off::SCENE_GLOBAL, &scene) || !scene) return;
+    if (!mem_read_i32((uint32_t)scene + x3::off::SCENE_PLAYER_ANCHOR, &ship) || !ship) return;
+    if (g_dock_drive_target) {                       // drive the dock op every frame (op-10 opens gate + sets cmd)
+        player_cmdengage((uint32_t)ship, (uint32_t)g_dock_drive_target, g_dock_drive_op,
+                         (g_dock_drive_op == 9) ? 1 : 4, g_dock_drive_bay, 1);   // op-9 entry takes argc=1 (NPC-verified)
+        if (!g_drive_on) return;
+    }
+    int32_t fl = 0;
+    if (mem_read_i32((uint32_t)ship + x3::off::OBJ_FLAGS, &fl))
+        mem_write_u32((uint32_t)ship + x3::off::OBJ_FLAGS,
+                      ((uint32_t)fl | x3::off::AUTOPILOT_ENGAGED) & ~0x08000200u);   // bit19 set; bit27+bit9 clear
+    int32_t plw = 0;
+    if (mem_read_i32((uint32_t)ship + x3::off::OBJ_PAYLOAD, &plw) && (uint32_t)plw >= 0x08000000u) {
+        if (g_drive_bay > -2) mem_write_u32((uint32_t)plw + x3::off::SHIP_CMD_BAY, (uint32_t)g_drive_bay);
+        if (g_drive_rearm > 0) mem_write_u16((uint32_t)plw + x3::off::SHIP_CMD_ID, (uint16_t)g_drive_rearm);
+    }
+}
+static std::string overlay_drive(int on, int rearm)
+{
+    mem_open_rw();
+    g_drive_on = (on != 0);
+    g_drive_rearm = rearm;
+    g_drive_bay = (rearm > 0) ? 0 : -2;     // when pinning a dock cmd, also pin bay 0 (keep dock context)
+    char b[96]; snprintf(b, sizeof b, "ok drive on=%d pin_cmd=%d pin_bay=%d",
+                         (int)g_drive_on, g_drive_rearm, g_drive_bay); return b;
+}
+// Enable/disable the per-frame DOCK driver: re-issue SA subcmd `op` (10=approach, 9=enter) on the
+// player toward `station` every frame. on=0 disables. This is the working injected auto-dock.
+static std::string overlay_dockdrive(uint32_t station, int op, int bay, int on)
+{
+    mem_open_rw();
+    g_dock_drive_op     = (op > 0) ? op : 10;
+    g_dock_drive_bay    = bay;
+    g_dock_drive_target = (on != 0) ? station : 0;
+    char b[112]; snprintf(b, sizeof b, "ok dockdrive target=0x%08x op=%d bay=%d on=%d",
+                          (unsigned)g_dock_drive_target, g_dock_drive_op, g_dock_drive_bay, on != 0); return b;
+}
+// Call a __cdecl void(uint) engine fn (e.g. input_dispatch_key_script@0x08053690) with one arg —
+// the clean injected-keypress path: callfn1 0x08053690 0x1064 = Shift+D (Dock At) as the player.
+static std::string overlay_callfn1(uint32_t addr, uint32_t arg)
+{
+    mem_open_rw();
+    typedef void (__attribute__((cdecl)) *fn1_t)(unsigned);
+    ((fn1_t)(uintptr_t)addr)(arg);
+    int32_t s7c = -1, c4 = -1; uint32_t P = player_ship_addr(), plw = 0; (void)plw;
+    if (P) { mem_read_i32((uint32_t)P + 0x7C, &s7c);
+             int32_t v = 0; if (mem_read_i32((uint32_t)P + 0x50, &v) && (uint32_t)v >= 0x08000000u)
+                 mem_read_i32((uint32_t)v + 0xC4, &c4); }
+    char b[128]; snprintf(b, sizeof b, "ok callfn1 addr=0x%08x arg=0x%x -> obj+0x7C=0x%08x cmd(C4)=%d",
+                          addr, arg, (uint32_t)s7c, c4 & 0xFFFF); return b;
+}
+// Call a __cdecl int(uint,uint,uint) engine fn with three args. Built to test the undock/launch
+// primitive object_set_container_relink@0x080f31c0(obj, container, bay): container=sector physically
+// relinks the docked player back into space. Reports the player's container (+0x54), command-task
+// handle (+0x7C), and the game-session SCREEN state — flight flag *(g_game_session+0x4bc) (==1 in
+// flight) and active scriptKey *(g_game_session+0x4c0) — so we can see whether the relink also flips
+// the game into flight (which the input-dispatch dock path requires).
+static std::string overlay_callfn3(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2)
+{
+    mem_open_rw();
+    typedef int (__attribute__((cdecl)) *fn3_t)(unsigned, unsigned, unsigned);
+    int ret = ((fn3_t)(uintptr_t)addr)(a0, a1, a2);
+    uint32_t P = player_ship_addr();
+    int32_t c54 = 0, s7c = 0, flight = -1, scrkey = 0, gsv = 0;
+    if (P) { mem_read_i32((uint32_t)P + 0x54, &c54); mem_read_i32((uint32_t)P + 0x7C, &s7c); }
+    if (mem_read_i32(0x0829f6b4, &gsv) && (uint32_t)gsv >= 0x08000000u) {   // g_game_session
+        mem_read_i32((uint32_t)gsv + 0x4bc, &flight);
+        mem_read_i32((uint32_t)gsv + 0x4c0, &scrkey);
+    }
+    char b[208]; snprintf(b, sizeof b,
+        "ok callfn3 0x%08x(0x%x,0x%x,0x%x) ret=%d -> container=0x%08x obj+0x7C=0x%08x flight(4bc)=%d scrkey(4c0)=0x%08x",
+        addr, a0, a1, a2, ret, (uint32_t)c54, (uint32_t)s7c, flight, (uint32_t)scrkey);
+    return b;
+}
+// General SA-native operator call: dispatch(0x7FFFFFFF, &{0,0,0}, subcmd, argc, cells) with up to 4
+// raw int cells (tag 4 = int/object-id). Unlike player_cmdengage it does NOT require a target and does
+// NOT open the executor gate — for probing player-state ops like SA_SetPlayerLand(shipId,0)=UNLAND
+// (subcmd 0x119, cell0=player scene-id, cell1=0). Object cells are scene-ids (engine resolves via
+// scene_lookup_object_by_id). Reports player container/cmd/obj+0x7C after.
+static std::string overlay_sacall(int subcmd, int argc, uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3)
+{
+    mem_open_rw();
+    uint8_t args[32]; for (int i = 0; i < 32; ++i) args[i] = 0;
+    uint32_t cells[4] = { c0, c1, c2, c3 };
+    for (int k = 0; k < 4; ++k) { int32_t v = (int32_t)cells[k];
+        args[5*k] = 4; args[5*k+1] = (uint8_t)v; args[5*k+2] = (uint8_t)(v >> 8);
+        args[5*k+3] = (uint8_t)(v >> 16); args[5*k+4] = (uint8_t)(v >> 24); }
+    int32_t p2buf[3] = { 0, 0, 0 };
+    typedef int (__attribute__((cdecl)) *dispatch_t)(void*, void*, int, int, void*);
+    int ret = ((dispatch_t)0x08116850u)((void*)0x7FFFFFFF, (void*)p2buf, subcmd, argc, args);
+    uint32_t P = player_ship_addr(); int32_t c54 = 0, s7c = 0, c4 = -1, plw = 0;
+    if (P) { mem_read_i32((uint32_t)P + 0x54, &c54); mem_read_i32((uint32_t)P + 0x7C, &s7c);
+             if (mem_read_i32((uint32_t)P + 0x50, &plw) && (uint32_t)plw >= 0x08000000u)
+                 mem_read_i32((uint32_t)plw + 0xC4, &c4); }
+    char b[208]; snprintf(b, sizeof b,
+        "ok sacall sub=0x%x argc=%d cells=[0x%x,0x%x,0x%x,0x%x] ret=%d -> container=0x%08x obj+0x7C=0x%08x cmd=%d",
+        subcmd, argc, c0, c1, c2, c3, ret, (uint32_t)c54, (uint32_t)s7c, c4 & 0xFFFF);
+    return b;
+}
+// Raw u32 write probe — write `val` to absolute `addr` and read it back. For testing which game-state
+// fields gate behavior (e.g. the game-session docked-screen context at gs+0x488 / gs+0x494).
+static std::string overlay_poke(uint32_t addr, uint32_t val)
+{
+    mem_open_rw();
+    int32_t before = 0; mem_read_i32(addr, &before);
+    mem_write_u32(addr, val);
+    int32_t after = 0; mem_read_i32(addr, &after);
+    char b[112]; snprintf(b, sizeof b, "ok poke 0x%08x: 0x%08x -> 0x%08x (wanted 0x%08x)",
+                          addr, (uint32_t)before, (uint32_t)after, val);
+    return b;
+}
+// ISOLATED Input-script trace: arm the SA-native dispatch breakpoint, fire input_dispatch_key_script(cmdId)
+// SYNCHRONOUSLY (between frames, on this thread), then disarm+dump — so the captured SA-op sequence is
+// ONLY what the "Input" script runs for this key (no per-frame pollution). a2 column = SA subcmd. Lets us
+// diff the docked vs flight Input-script path to find the docked dock-gate.
+static std::string overlay_tracedock(uint32_t cmdId, uint32_t traceAddr)
+{
+    if (!traceAddr) traceAddr = 0x08116850u;                 // default: SA-native dispatch entry
+    overlay_exectrace(traceAddr, 0);                         // arm BP at the chosen probe point
+    typedef void (__attribute__((cdecl)) *fn1_t)(unsigned);
+    ((fn1_t)(uintptr_t)0x08053690u)(cmdId);                  // run the Input script for this key, synchronously
+    return overlay_exectrace(0, 0);                          // disarm + dump the captured sequence
+}
+// ROUTE B — hand-build an MsciTask running the dock orchestrator `!ship.cmd.movestation.std` bound to the
+// player, replicating what the menu's START-command does (the script_resolve_and_alloc_task fabrication),
+// because run_script can't resolve a command-script by NAME (its name isn't a class method). Staged so each
+// safe step is verifiable before the crash-prone scheduler link. Recipe live-verified — see memory
+// x3-player-dock-drive (Route B). Run between frames (debug pump). Re-resolves the heap-relocated entry-ip.
+//   stage 0: resolve orchestrator instance + entry-ip/localcount (read-only)
+//   stage 1: + alloc task + init the choke's fields (no arg push, no link)
+//   stage 2: + push station arg on the value stack (no link)
+//   stage 3: + bind obj+0x7C/0x78 + link into scheduler (the live spawn)
+
+// Resolve the `!ship.cmd.movestation.std` orchestrator INSTANCE stably (its ptr + per-run key relocate
+// every launch; the entry OFFSET 0xd952b does NOT). Walk the VM instance-map (root+0x12d0: bucketArr@+0,
+// cap@+4; node next@+0, value=instance@+8) and match the instance whose private scope[0] (inst+8:
+// count@+0x28, methodArr@+0x2c stride0x10) holds a method with rec[0]==entryOff. task+0x3c must be THIS
+// instance (command-scripts live only in their own private scope — playerKey+name fails the choke bsearch).
+static uint32_t resolve_orch_instance(uint32_t root, uint32_t entryOff)
+{
+    static uint32_t s_cache = 0;
+    if (s_cache >= 0x08000000u) {                       // re-validate cache (instance stable within a run)
+        int32_t sc0 = 0, arr = 0, r0 = 0;
+        if (mem_read_i32(s_cache + 8, &sc0) && (uint32_t)sc0 >= 0x08000000u &&
+            mem_read_i32((uint32_t)sc0 + 0x2c, &arr) && (uint32_t)arr >= 0x08000000u &&
+            mem_read_i32((uint32_t)arr, &r0) && (uint32_t)r0 == entryOff)
+            return s_cache;
+        s_cache = 0;
+    }
+    int32_t mapStruct = 0, bucketArr = 0, cap = 0;
+    if (!mem_read_i32(root + 0x12d0, &mapStruct) || (uint32_t)mapStruct < 0x08000000u) return 0;
+    if (!mem_read_i32((uint32_t)mapStruct + 0, &bucketArr) || (uint32_t)bucketArr < 0x08000000u) return 0;
+    if (!mem_read_i32((uint32_t)mapStruct + 4, &cap) || cap <= 0 || (uint32_t)cap > 0x200000u) return 0;
+    for (uint32_t b = 0; b < (uint32_t)cap; b++) {
+        int32_t node = 0;
+        if (!mem_read_i32((uint32_t)bucketArr + b * 4, &node)) continue;
+        int g = 0;
+        while ((uint32_t)node >= 0x08000000u && g++ < 100000) {
+            int32_t inst = 0; mem_read_i32((uint32_t)node + 8, &inst);
+            if ((uint32_t)inst >= 0x08000000u) {
+                int32_t sc0 = 0; mem_read_i32((uint32_t)inst + 8, &sc0);   // scope[0] (private)
+                if ((uint32_t)sc0 >= 0x08000000u) {
+                    int32_t cnt = 0, arr = 0;
+                    mem_read_i32((uint32_t)sc0 + 0x28, &cnt);
+                    mem_read_i32((uint32_t)sc0 + 0x2c, &arr);
+                    if ((uint32_t)arr >= 0x08000000u && cnt > 0 && cnt < 100000) {
+                        for (int i = 0; i < cnt; i++) {
+                            int32_t r0 = 0;
+                            if (mem_read_i32((uint32_t)arr + (uint32_t)i * 0x10, &r0) && (uint32_t)r0 == entryOff) {
+                                s_cache = (uint32_t)inst; return (uint32_t)inst;
+                            }
+                        }
+                    }
+                }
+            }
+            int32_t nxt = 0; mem_read_i32((uint32_t)node + 0, &nxt); node = nxt;
+        }
+    }
+    return 0;
+}
+// Native VM dock module (workflow design 2026-07-02): direct-spawn a task running our OWN byte-op
+// program that fires SA-native op-0x82 subcmd 0x0c on group 8 (ship-command class) = the crash-free
+// deferred-bay DOCKAT setter (0x0811c774): writes payload+0xc4=4, +0x98=station, +0xbc=-1; the
+// per-frame executor then selects the bay + flies + docks. arg0=ship(actor), arg1=station, arg2..4=0.
+// No [THIS] bind, no orchestrator, no bay math -> avoids the dock_compute_approach_for_bay crash.
+// group=8 / subcmd=0x0c LIVE-verified; push ops 0x01(int0)/0x05(i8)/0x07(i32)/0x70(END)/0x82(SA) jumptable-verified.
+//   stage 0 = mechanism proof (push 0; END).  stage 1 = DOCKAT.  stage 2 = sub-0x09 tunnel prefix + DOCKAT (R1 stall fallback).
+static std::string overlay_natdock(uint32_t station, int stage)
+{
+    mem_open_rw();
+    char b[320];
+    int32_t ROOT = 0;
+    if (!mem_read_i32(0x08308880, &ROOT) || (uint32_t)ROOT < 0x08000000u) return "err no root";
+    uint32_t player = player_ship_addr();
+    if (!player) return "err no player";
+    if (stage >= 1 && !station) return "err no station";
+
+    // stage 3 = DIRECT FIELD POKE: replicate subcmd-0x0c handler 0x0811c774, which is PURE field writes,
+    // so we skip the VM task entirely (the alloc+link spawn path in stages 0-2 crashes — link_into_scheduler
+    // needs resolver-set task state the bare alloc doesn't provide). +0xbc=-1 (deferred bay) is the field the
+    // old overshooting struct-poke missed; the per-frame executor selects the bay + flies + docks.
+    if (stage == 3) {
+        int32_t pay3 = 0;
+        if (!mem_read_i32(player + 0x50, &pay3) || (uint32_t)pay3 < 0x08000000u) return "err no payload";
+        mem_write_u16((uint32_t)pay3 + 0xc4, 4);            // DOCKAT command id
+        mem_write_u32((uint32_t)pay3 + 0x98, station);      // target station OBJECT ptr
+        mem_write_u32((uint32_t)pay3 + 0xbc, 0xffffffffu);  // bay = -1 (deferred)
+        mem_write_u32((uint32_t)pay3 + 0xac, 0);            // params
+        mem_write_u32((uint32_t)pay3 + 0xb0, 0);
+        mem_write_u32((uint32_t)pay3 + 0xb4, 0);
+        int32_t c4 = 0, c98 = 0, cbc = 0, o40 = 0, sid3 = 0;
+        mem_read_i32(station + 0x08, &sid3);
+        mem_read_i32((uint32_t)pay3 + 0xc4, &c4); mem_read_i32((uint32_t)pay3 + 0x98, &c98);
+        mem_read_i32((uint32_t)pay3 + 0xbc, &cbc); mem_read_i32(player + 0x40, &o40);
+        snprintf(b, sizeof b, "ok natdock stage3 FIELD-POKE C4=0x%x(want 4) target=0x%08x(station 0x%08x sid 0x%x) bay=0x%x(want ffffffff) obj40=0x%08x",
+                 c4 & 0xFFFF, (uint32_t)c98, station, (uint32_t)sid3, (uint32_t)cbc, (uint32_t)o40);
+        return b;
+    }
+
+    int32_t plSid = 0, stSid = 0, codebase = 0, plKey = 0;
+    mem_read_i32(player + 0x08, &plSid);
+    if (station) mem_read_i32(station + 0x08, &stSid);
+    mem_read_i32((uint32_t)ROOT + 0x08, &codebase);
+    mem_read_i32(player + 0x90, &plKey);
+    typedef uint32_t (__attribute__((cdecl)) *lookup_t)(uint32_t, uint32_t);
+    uint32_t plInst = ((lookup_t)0x0809dfc0u)((uint32_t)ROOT, (uint32_t)plKey);
+    if (plInst < 0x08000000u) { snprintf(b, sizeof b, "err plInst=0x%x key=0x%x", plInst, (uint32_t)plKey); return b; }
+
+    // Build the byte-op program in a PERSISTENT static buffer (interpreter + scheduler may re-read it).
+    static uint8_t PROG[80];
+    int n = 0;
+    auto pI32 = [&](int32_t v) { PROG[n++] = 0x07; memcpy(PROG + n, &v, 4); n += 4; };  // push int32
+    if (stage == 0) {
+        PROG[n++] = 0x01; PROG[n++] = 0x70;                    // push int 0; END-TASK  (mechanism proof)
+    } else if (stage == 4) {
+        // op-0x85 call-on-object -> StartExecuteCommand([THIS]=player, arg0=cmd7 DOCKAT, arg1=station).
+        // op-0x85 pops the object (TOS) + RETARGETS [THIS], and reads the cell BELOW the object as argc.
+        // CORRECT frame (agent RE) from TOS: [object=player][argc=2][arg0=cmd][arg1=station]. Physical push
+        // order (deepest first): station, cmd7, argc2, player. (My earlier bug omitted the argc cell -> garbage
+        // target -> orchestrator crashed in dock_compute_approach_for_bay ~6s later. NOT a context wall.)
+        pI32(stSid);                                           // arg1 = station scene-id (deepest)
+        PROG[n++] = 0x05; PROG[n++] = 0x07;                    // push i8 7 -> arg0 = cmd COMMAND_DOCKAT
+        PROG[n++] = 0x05; PROG[n++] = 0x02;                    // push i8 2 -> argc
+        PROG[n++] = 0x07; memcpy(PROG + n, &plKey, 4); n += 4; // push player instance key -> object (TOS)
+        int32_t nsid = 0x4d7d;                                 // StartExecuteCommand nameStrId
+        PROG[n++] = 0x85; memcpy(PROG + n, &nsid, 4); n += 4;  // op-0x85
+        PROG[n++] = 0x70;                                      // END
+    } else {
+        if (stage == 2) {                                      // R1 fallback: build approach tunnel first (sub-0x09, loops REAL bays -> crash-safe)
+            pI32(stSid); pI32(plSid);                          // arg1=station, arg0=ship
+            PROG[n++] = 0x05; PROG[n++] = 0x02;                // push i8 2 (argc)
+            PROG[n++] = 0x82; PROG[n++] = 0x08; PROG[n++] = 0x00; PROG[n++] = 0x09; PROG[n++] = 0x00;  // op0x82 group8 sub0x09
+        }
+        PROG[n++] = 0x01; PROG[n++] = 0x01; PROG[n++] = 0x01;  // push 0,0,0 -> params arg2,3,4
+        pI32(stSid); pI32(plSid);                              // arg1=station, arg0=ship(actor)
+        PROG[n++] = 0x05; PROG[n++] = 0x05;                    // push i8 5 (argc)
+        PROG[n++] = 0x82; PROG[n++] = 0x08; PROG[n++] = 0x00; PROG[n++] = 0x0c; PROG[n++] = 0x00;  // op0x82 group8 sub0x0c DOCKAT
+        PROG[n++] = 0x70;                                      // END-TASK
+    }
+
+    int32_t o7c0 = 0; mem_read_i32(player + 0x7c, &o7c0);
+    if (stage >= 1 && o7c0 != 0) { snprintf(b, sizeof b, "err player busy obj+0x7c=0x%08x — clear cmd first", (uint32_t)o7c0); return b; }
+
+    typedef uint32_t (__attribute__((cdecl)) *alloc_t)(uint32_t, int);
+    uint32_t task = ((alloc_t)0x080a10e0u)((uint32_t)ROOT, 0x20);   // 32-cell value stack, plenty
+    if (task < 0x08000000u) { snprintf(b, sizeof b, "err alloc task=0x%x", task); return b; }
+    mem_write_u32(task + 0x30, 0);                              // ctx=0 => no completion-notify (fire-and-forget, safe)
+    mem_write_u32(task + 0x34, 0);                             // caller
+    mem_write_u16(task + 0x38, 1);                             // mode
+    mem_write_u32(task + 0x3c, plInst);                       // instance/scope
+    uint32_t ipoff = (uint32_t)(uintptr_t)&PROG[0] - (uint32_t)codebase;  // code_base + ip round-trips to &PROG (32-bit)
+    mem_write_u32(task + 0x1c, ipoff);
+
+    // script_task_link_into_scheduler is __regparm3 (task in EAX) + runs slice-1 synchronously. The old
+    // asm `call *%1` dereferenced the TASK operand (call *task = garbage-as-code) -> crash; call it as a
+    // proper regparm(3) function so `task` lands in EAX.
+    typedef int (__attribute__((regparm(3))) *link_t)(uint32_t);
+    int32_t ret = ((link_t)0x0809e1d0u)(task);
+
+    int32_t o7c = 0, c4 = 0, c98 = 0, cbc = 0, pay = 0;
+    mem_read_i32(player + 0x7c, &o7c);
+    if (mem_read_i32(player + 0x50, &pay) && (uint32_t)pay >= 0x08000000u) {
+        mem_read_i32((uint32_t)pay + 0xc4, &c4);
+        mem_read_i32((uint32_t)pay + 0x98, &c98);
+        mem_read_i32((uint32_t)pay + 0xbc, &cbc);
+    }
+    if (stage == 0) { snprintf(b, sizeof b, "ok natdock stage0 MECH-PROOF task=0x%08x ret=0x%x ipoff=0x%08x (push0;END ran — game alive)", task, ret, ipoff); return b; }
+    snprintf(b, sizeof b, "ok natdock stage%d group8/sub0xc ret=0x%x -> obj7C=0x%08x C4=0x%x(want 4) target=0x%08x(want 0x%x) bay=0x%x(want ffffffff)",
+             stage, ret, (uint32_t)o7c, c4 & 0xFFFF, (uint32_t)c98, (uint32_t)stSid, (uint32_t)cbc);
+    return b;
+}
+
+static std::string overlay_spawnorch(uint32_t station, int stage)
+{
+    mem_open_rw();
+    char b[420];
+    int32_t ROOT = 0, SCENE = 0, ctx = 0;
+    if (!mem_read_i32(0x08308880, &ROOT)  || (uint32_t)ROOT  < 0x08000000u) return "err no root";
+    if (!mem_read_i32(0x0837a0d0, &SCENE) || (uint32_t)SCENE < 0x08000000u) return "err no scene";
+    mem_read_i32((uint32_t)SCENE + 0x60, &ctx);
+    uint32_t player = player_ship_addr();
+    if (!player || !station) return "err no player/station";
+    int32_t stSid = 0, plSid = 0; mem_read_i32(player + 0x08, &plSid); mem_read_i32(station + 0x08, &stSid);
+
+    // (a) PLAYER instance (= task+0x3c, the [THIS]/context) + orchestrator entry-ip via stable code OFFSET.
+    // The orchestrator's sequential instance-id shifts per run, so resolve the PLAYER instance (its scriptKey
+    // *(player+0x90) is stable per ship) and reach the orchestrator's bytecode by its global-code-segment
+    // OFFSET (base = *(root+8)) — the offset is run-stable even though the base heap-relocates each launch.
+    typedef uint32_t (__attribute__((cdecl)) *lookup_t)(uint32_t, uint32_t);
+    int32_t plKey = 0; mem_read_i32(player + 0x90, &plKey);
+    uint32_t plInst = ((lookup_t)0x0809dfc0u)((uint32_t)ROOT, (uint32_t)plKey);
+    if (plInst < 0x08000000u) { snprintf(b, sizeof b, "err player inst=0x%x key=0x%x", plInst, (uint32_t)plKey); return b; }
+    // station objref box for $object (arg1): its MSCI instance (box[0]==stKey==raw *(station+0x90)); deref does
+    // key=~box[0] -> handle-map -> station object. Fallback = a static box if the station has no instance.
+    int32_t stKey = 0; mem_read_i32(station + 0x90, &stKey);
+    uint32_t stInst = ((lookup_t)0x0809dfc0u)((uint32_t)ROOT, (uint32_t)stKey);
+    int32_t codebase = 0, trailing = 0;
+    mem_read_i32((uint32_t)ROOT + 0x08, &codebase);
+    mem_read_i32((uint32_t)plInst + 0x0c, &trailing);
+    uint32_t entryOff = 0xd952bu;                        // !ship.cmd.movestation.std entry OFFSET into code segment
+    uint32_t entryIp = (uint32_t)codebase + entryOff;   // absolute (report/verify only; task+0x1c takes the OFFSET)
+    uint32_t orchInst = resolve_orch_instance((uint32_t)ROOT, entryOff);   // task+0x3c = the ORCHESTRATOR instance
+    int cellCount = 10;                                  // locals(0)+7+vshint(3)
+    int32_t gs2 = 0; mem_read_i32(0x0829f6b4, &gs2); if (gs2) mem_read_i32(gs2 + 0x418, &ctx);   // owner ctx (=9)
+    if (stage <= 0) {
+        int32_t orc0 = 0, os0 = 0, oarr = 0; if (orchInst >= 0x08000000u) { mem_read_i32(orchInst + 8, &os0);
+            if ((uint32_t)os0 >= 0x08000000u && mem_read_i32((uint32_t)os0 + 0x2c, &oarr) && (uint32_t)oarr >= 0x08000000u) mem_read_i32((uint32_t)oarr, &orc0); }
+        snprintf(b, sizeof b, "ok stage0 orchInst=0x%08x rec0=0x%x plInst=0x%08x plKey=0x%x codebase=0x%08x entryIp=0x%08x cellCount=%d ctx=0x%08x stSid=0x%x",
+                 orchInst, (uint32_t)orc0, plInst, (uint32_t)plKey, (uint32_t)codebase, entryIp, cellCount, (uint32_t)ctx, (uint32_t)stSid);
+        return b;
+    }
+    // guard: don't spawn over a live command task (leak/conflict)
+    int32_t o7c0 = 0; mem_read_i32(player + 0x7c, &o7c0);
+    if (o7c0 != 0) { snprintf(b, sizeof b, "err player busy (obj+0x7C=0x%08x) — clear command first", (uint32_t)o7c0); return b; }
+    if (orchInst < 0x08000000u) { snprintf(b, sizeof b, "err orchestrator instance not found (map walk, entryOff=0x%x)", entryOff); return b; }
+
+    // (b) alloc task (cdecl(root, cellCount)); (c) init the fields the choke sets
+    typedef uint32_t (__attribute__((cdecl)) *alloc_t)(uint32_t, int);
+    uint32_t task = ((alloc_t)0x080a10e0u)((uint32_t)ROOT, cellCount);
+    if (task < 0x08000000u) { snprintf(b, sizeof b, "err alloc task=0x%x", task); return b; }
+    mem_write_u32(task + 0x30, (uint32_t)ctx);     // owner
+    mem_write_u32(task + 0x34, 0);                 // caller
+    mem_write_u16(task + 0x38, 1);                 // mode (async)
+    mem_write_u32(task + 0x3c, (stage == 8) ? plInst : orchInst);   // stage 8 = PLAYER-instance context (like native docking task)
+    mem_write_u32(task + 0x1c, entryOff);          // task+0x1c = byte OFFSET into code (abs=codebase+ip), NOT absolute
+    int32_t handle = 0, sb = 0, sp = 0;
+    mem_read_i32(task + 0x08, &handle); mem_read_i32(task + 0x14, &sb); mem_read_i32(task + 0x18, &sp);
+    if (stage <= 1) {
+        snprintf(b, sizeof b, "ok stage1 task=0x%08x handle=0x%x stackbase=0x%08x sp=%d (alloc+fields done; no push/link)",
+                 task, (uint32_t)handle, (uint32_t)sb, sp);
+        return b;
+    }
+
+    // (d) BYTE-EXACT run_script_async@0x0809e270: push each arg as a tag-1 INT cell (OBJECT args = their
+    // SCENE-ID integer *(obj+0x08), NOT a tag-10 objref), then sp-=1 and push a trailing tag-1 cell =
+    // methodrec[0xc] (=localcount, 0 for movestation.std). cell = stack_base + (sp+i)*5.
+    auto pushcell = [&](int32_t cellIdx, uint8_t tag, int32_t val) {
+        uint8_t buf[5]; buf[0] = tag; memcpy(buf + 1, &val, 4);
+        mem_write_bytes((uint32_t)(sb + cellIdx * 5), buf, 5);
+    };
+    if (stage == 15 || stage == 16) {
+        // MIRROR run_script_async@0x0809e270 EXACTLY (decompiled 2026-07-02): push argc tag-1 cells at
+        // cell (sp0+i) with sp0 UNCHANGED during the loop, then sp-=1 + trailing tag-1 = methodRec[0xc]
+        // (localcount), then script_task_link_into_scheduler@0x0809e1d0 (adds tag-3 + tag-10 NULL, links,
+        // RUNS first slice). [THIS]=arg0, $object=arg1 (both tag-1 scene-id ints). The old 8-cell frame
+        // was decoded from the WRONG object (0xd952b in x3story.obj is unrelated base code). stage16 swaps
+        // arg0/arg1 to A/B the actor/object slot.
+        int32_t a0 = (stage == 16) ? stSid : plSid;   // arg0 = [THIS] (player ship scene-id)
+        int32_t a1 = (stage == 16) ? plSid : stSid;   // arg1 = $object (station scene-id)
+        pushcell(sp + 0, 1, a0);
+        pushcell(sp + 1, 1, a1);
+        int32_t sp1 = sp - 1; mem_write_u32(task + 0x18, (uint32_t)sp1);
+        int32_t os = 0, oarr = 0, recC = 0;
+        mem_read_i32((int32_t)orchInst + 8, &os);
+        if ((uint32_t)os   >= 0x08000000u) mem_read_i32((uint32_t)os + 0x2c, &oarr);
+        if ((uint32_t)oarr >= 0x08000000u) mem_read_i32((uint32_t)oarr + 0xc, &recC);
+        pushcell(sp1, 1, recC);
+        uint32_t fn = 0x0809e1d0u, ret = 0;   // script_task_link_into_scheduler (regparm; task in EAX)
+        __asm__ __volatile__("call *%1" : "=a"(ret) : "a"(task), "r"(fn) : "ecx","edx","memory","cc");
+        int32_t o7c=0,c4=0,c54=0,plw=0;
+        mem_read_i32(player+0x7c,&o7c); mem_read_i32(player+0x54,&c54);
+        if (mem_read_i32(player+0x50,&plw) && (uint32_t)plw>=0x08000000u) mem_read_i32((uint32_t)plw+0xc4,&c4);
+        snprintf(b, sizeof b, "ok stage%d MIRROR-RSA a0=0x%x a1=0x%x sp0=%d ret=0x%x -> obj7C=0x%08x C4=%d cont=0x%08x",
+                 stage, a0, a1, sp, ret, (uint32_t)o7c, c4 & 0xFFFF, (uint32_t)c54);
+        return b;
+    }
+    // 8-cell caller frame decoded from movestation.std body (thunk: ENSURE_STACK 7 + 5x push-STACKvar w=8):
+    // cell i (at stack_base + (sp-i)*5, i=0 shallow .. i=7 deepest) — i=7=[THIS]=ship sceneid, i=6=$object=station
+    // sceneid, i=0..5 = tag-1 int 0 (params/slack). stage 12 swaps i6/i7 (the one uncertain [THIS]/$object slot).
+    int32_t thisV = (stage == 12) ? stSid : plSid;
+    int32_t objV  = (stage == 12) ? plSid : stSid;
+    for (int i = 0; i <= 7; i++) {
+        int32_t v = (i == 7) ? thisV : ((i == 6) ? objV : 0);
+        pushcell(sp - i, 1, v);                   // cell at sb + (sp - i)*5
+    }
+    sp -= 8; mem_write_u32(task + 0x18, (uint32_t)sp);
+    if (stage <= 2) {
+        snprintf(b, sizeof b, "ok stage2 task=0x%08x plSid=0x%x stSid=0x%x sp=%d (8-cell caller frame, no link)",
+                 task, (uint32_t)plSid, (uint32_t)stSid, sp);
+        return b;
+    }
+
+    if (stage == 4) {   // ISOLATION: engine's OWN link (seeds [THIS]=null) — does the task then run/persist?
+        mem_write_u32(player + 0x7c, (uint32_t)handle);
+        mem_write_u32(player + 0x78, 1);
+        uint32_t fn = 0x0809e1d0u, ret = 0;
+        __asm__ __volatile__("call *%1" : "=a"(ret) : "a"(task), "r"(fn) : "ecx", "edx", "memory", "cc");
+        int32_t o7c = 0; mem_read_i32(player + 0x7c, &o7c);
+        snprintf(b, sizeof b, "ok stage4 ASMLINK task=0x%08x handle=0x%x ret=0x%x obj7C=0x%08x ([THIS]=null via engine link)",
+                 task, (uint32_t)handle, ret, (uint32_t)o7c);
+        return b;
+    }
+    // (e) the [THIS] box IS the player INSTANCE (GROUND-TRUTH 2026-06-30: native dock's bottom tag-10 cell box ==
+    // task+0x3c == plInst; box[0]==plKey raw *(player+0x90), box[8]==classChain!=0). The deref does key=~box[0]
+    // -> handle-map lookup -> player object. So seed the [THIS] cell with plInst (no hand-made box; my prior
+    // ~plKey static box was INVERTED -> resolved wrong -> crash).
+    // (f) replicate script_task_link_into_scheduler@0x0809e1d0 but seed the bottom tag-10 [THIS] cell with the
+    // PLAYER instance instead of NULL (the launcher's NULL seed is what crashed the orchestrator), then kick.
+    int32_t sp2 = sp - 1; mem_write_u32(task + 0x18, (uint32_t)sp2);                 // push tag-3 marker
+    { uint8_t z3[5] = {3,0,0,0,0}; mem_write_bytes((uint32_t)((int32_t)sb + sp2*5), z3, 5); }
+    sp2 -= 1; mem_write_u32(task + 0x18, (uint32_t)sp2);                             // push tag-10 [THIS]
+    { uint8_t z0[5] = {0,0,0,0,0}; mem_write_bytes((uint32_t)((int32_t)sb + sp2*5), z0, 5); }  // zero -> no stale-destroy
+    typedef void (__attribute__((cdecl)) *setobj_t)(void*, void*);                  // msci_cell_set_objref_tag10
+    // stage13 = ABI-agent fix (2026-07-02): the bottom tag-10 cell IS the script [THIS]; the launcher seeds it
+    // NULL and THAT is why the orchestrator ran but never acted on the player. Seed it = plInst (the PLAYER
+    // instance box, exactly what the native dock's bottom cell holds — box[0]==plKey). stage3 keeps NULL baseline.
+    uint32_t thisBox = (stage == 13) ? (uint32_t)plInst : 0u;
+    ((setobj_t)0x080a9150u)((void*)(uintptr_t)(uint32_t)((int32_t)sb + sp2*5), (void*)(uintptr_t)thisBox);
+    if (stage == 9) {   // value stack built (args + tag-3 + tag-10 [THIS]) but NOT scheduled/kicked — inspectable
+        snprintf(b, sizeof b, "ok stage9 task=0x%08x sb=0x%08x sp=%d thisCell=0x%08x plInst=0x%08x (built, NOT scheduled)",
+                 task, (uint32_t)sb, sp2, (uint32_t)((int32_t)sb + sp2*5), plInst);
+        return b;
+    }
+    mem_write_u16(task + 0x3a, 1);   // linkage=1 (disasm: MOV word[EBX+0x3a],1) — THIS makes the scheduler RUN the task
+    int32_t head = 0; mem_read_i32((uint32_t)ROOT + 0x12e0, &head);                  // ready-list prepend
+    mem_write_u32(task + 0x04, (uint32_t)head);                                      // task->list_prev = head
+    if ((uint32_t)head >= 0x08000000u) mem_write_u32((uint32_t)head + 0x00, task);  // head->hash_link_next = task
+    mem_write_u32(task + 0x00, (uint32_t)ROOT + 0x12dc);                             // task->hash_link_next = sentinel
+    mem_write_u32((uint32_t)ROOT + 0x12e0, task);                                    // head = task
+    mem_write_u32((uint32_t)ROOT + 0x1434, task);                                    // cursor = task
+    if (stage == 7) {   // verify all writes landed (no kick)
+        int32_t l3a=0,t00=0,t04=0,t18=0,rh=0,rc=0,ip=0,pr=0;
+        mem_read_i32(task+0x3a,&l3a); mem_read_i32(task+0x00,&t00); mem_read_i32(task+0x04,&t04);
+        mem_read_i32(task+0x18,&t18); mem_read_i32(task+0x1c,&ip); mem_read_i32(task+0x3c,&pr);
+        mem_read_i32((uint32_t)ROOT+0x12e0,&rh); mem_read_i32((uint32_t)ROOT+0x1434,&rc);
+        snprintf(b, sizeof b, "ok stage7 task=0x%08x link3a=0x%x t00=0x%08x t04=0x%08x sp=%d ip=0x%x prog=0x%08x head=0x%08x cursor=0x%08x sentinel=0x%08x",
+                 task, l3a & 0xffff, (uint32_t)t00, (uint32_t)t04, t18, (uint32_t)ip, (uint32_t)pr, (uint32_t)rh, (uint32_t)rc, (uint32_t)ROOT+0x12dc);
+        return b;
+    }
+    mem_write_u32(player + 0x7c, (uint32_t)handle);                                  // bind command-task hooks
+    mem_write_u32(player + 0x78, 1);
+    if (stage == 10) overlay_exectrace(0x08116850u, 0);   // arm SA-dispatch trace AROUND the synchronous kick (isolate my task's ops)
+    if (stage == 11) overlay_exectrace(0x080a215bu, 0);   // trace op-0x6e ENSURE-STACK handler (orchestrator's FIRST op) — did the task run at all?
+    typedef void (__attribute__((cdecl)) *run_t)(uint32_t, uint32_t);               // KICK: msci_vm_run_task(root,task)
+    ((run_t)0x080a1710u)((uint32_t)ROOT, task);
+    if (stage == 10 || stage == 11) return overlay_exectrace(0, 0);   // disarm + dump ONLY the kick's traced ops
+    int32_t o7c = 0, pl = 0, c4 = 0, c54 = 0;
+    mem_read_i32(player + 0x7c, &o7c); mem_read_i32(player + 0x54, &c54);
+    if (mem_read_i32(player + 0x50, &pl) && (uint32_t)pl >= 0x08000000u) mem_read_i32(pl + 0xc4, &c4);
+    snprintf(b, sizeof b, "ok stage3 SEEDED(plInst=0x%08x)+LINKED task=0x%08x handle=0x%x -> obj+0x7C=0x%08x cmd(C4)=%d container=0x%08x",
+             plInst, task, (uint32_t)handle, (uint32_t)o7c, c4 & 0xFFFF, (uint32_t)c54);
+    return b;
+}
+// Set the player's HUD target to `target_addr` (mode lock) — same path as the overlay's
+// select_target, so Shift+D=Dock-At then acts on it. Lets us target + dock fully from injection.
+static std::string overlay_settarget(uint32_t target_addr)
+{
+    if (!target_addr) return "err no target";
+    mem_open();
+    x3::Mem m = make_engine_mem();
+    uint32_t scene = 0, player = 0;
+    if (!(m.u32(x3::off::SCENE_GLOBAL, scene) && scene &&
+          m.u32(scene + x3::off::SCENE_PLAYER_ANCHOR, player) && player)) return "err no scene/player";
+    uint32_t grav = x3::find_player_gravidar(m, player);
+    if (!grav) return "err no gravidar";
+    typedef void (__attribute__((cdecl)) *set_target_t)(void*, int16_t, void*);
+    ((set_target_t)(uintptr_t)x3::off::GRAVIDAR_SET_TARGET_FN)(
+        (void*)(uintptr_t)grav, x3::off::TARGET_MODE_LOCK, (void*)(uintptr_t)target_addr);
+    uint32_t cur = 0; m.u32(grav + x3::off::GRAVIDAR_TARGET, cur);
+    char b[112]; snprintf(b, sizeof b, "ok settarget grav=0x%08x target=0x%08x -> cur=0x%08x", grav, target_addr, cur); return b;
+}
+// Queue a synthetic SDL key event into the game's own input chain (the clean "fake a keypress" —
+// e.g. Shift+D for auto-dock). down=1 KEYDOWN / 0 KEYUP. Injected at the next SDL_PeepEvents read,
+// so the game runs its full SDL->TranslateKey->Input->dock path with everything engine-filled.
+static std::string overlay_synthkey(int scancode, int sym, int mod, int down)
+{
+    SDL_Event e; memset(&e, 0, sizeof e);
+    e.type                = down ? SDL_KEYDOWN : SDL_KEYUP;
+    e.key.timestamp       = SDL_GetTicks();
+    e.key.windowID        = g_sdl_window ? SDL_GetWindowID(g_sdl_window) : 0;
+    e.key.state           = down ? SDL_PRESSED : SDL_RELEASED;
+    e.key.repeat          = 0;
+    e.key.keysym.scancode = (SDL_Scancode)scancode;
+    e.key.keysym.sym      = sym;
+    e.key.keysym.mod      = (Uint16)mod;
+    int r = SDL_PushEvent(&e);            // into SDL's REAL queue — what the game's SDL_PollEvent reads
+    char b[140]; snprintf(b, sizeof b, "ok synthkey sc=%d sym=0x%x mod=%d down=%d push=%d win=%u",
+                          scancode, sym, mod, down, r, (unsigned)e.key.windowID); return b;
+}
+// Force scancode (+ optional LSHIFT) into SDL's polled keyboard STATE for `frames` frames — the
+// approach that actually drives this polling game. synthdock = hold SDL_SCANCODE_D + shift.
+static std::string overlay_synthhold(int sc, int shift, int frames)
+{
+    g_synth_sc = sc; g_synth_shift = shift; g_synth_hold = frames;
+    char b[96]; snprintf(b, sizeof b, "ok synthhold sc=%d shift=%d frames=%d", sc, shift, frames); return b;
+}
+// Diagnostic: is the pump-hook running (hold decrements), does our SDL share the game's keyboard
+// state (ks reflects real presses), and is ImGui eating keys (wantkbd)?
+static std::string overlay_synthdiag(void)
+{
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    int wantkbd = -1; if (g_inited) wantkbd = (int)ImGui::GetIO().WantCaptureKeyboard;
+    char b[220];
+    snprintf(b, sizeof b, "ok synthdiag hold=%d sc=%d ks_D(7)=%d ks_LSHIFT(225)=%d mod=0x%x wantkbd=%d uivis=%d",
+             g_synth_hold, g_synth_sc, ks?ks[7]:-1, ks?ks[225]:-1, (unsigned)SDL_GetModState(),
+             wantkbd, (int)g_ui_visible);
+    return b;
+}
+
+// Resolve a scheduler task HANDLE (= ship obj+0x7C) -> task struct -> script id + THIS scene-id.
+// task_handle_map_lookup@0x080a49e0(root, handle) -> task ptr; task+0x3c = program; *program = script id;
+// task+0x38 = THIS scene-id (the ship the script acts on).
+static std::string overlay_taskid(uint32_t handle)
+{
+    char b[200];
+    int32_t root = 0; mem_read_i32(0x08308880, &root);
+    typedef int (__attribute__((cdecl)) *lookup_t)(int, int);
+    int task = ((lookup_t)0x080a49e0u)((int)(uint32_t)root, (int)handle);
+    int32_t prog = 0, thisid = 0, sid = -1;
+    if ((uint32_t)task >= 0x08000000u) {
+        mem_read_i32((uint32_t)task + 0x3c, &prog);
+        mem_read_i32((uint32_t)task + 0x38, &thisid);
+        if ((uint32_t)prog >= 0x08000000u) mem_read_i32((uint32_t)prog, &sid);
+    }
+    snprintf(b, sizeof b, "ok taskid handle=0x%x root=0x%x task=0x%08x program=0x%08x script_id=%d THIS=%d",
+             handle, (uint32_t)root, (uint32_t)task, (uint32_t)prog, sid, thisid & 0xFFFF);
+    return b;
+}
+
+// Spawn a script-task via run_script_async (full ABI): owner=0, caller=0, scriptKey, entry, THIS, argc, arg.
+// THIS (arg4) = the scene-id of the object the script's [THIS] acts on. argc/arg pass the script argument.
+static std::string overlay_spawn(uint32_t scriptKey, std::string entry, uint32_t thisId, uint32_t arg, int argc)
+{
+    char b[224];
+    typedef int (__attribute__((cdecl)) *rsa_t)(void*, int, int, const char*, int, unsigned, ...);
+    const char* e = entry.empty() ? (const char*)nullptr : entry.c_str();
+    int h;
+    if (argc <= 0) h = ((rsa_t)0x0809e270u)(nullptr, 0, (int)scriptKey, e, (int)thisId, 0u);
+    else           h = ((rsa_t)0x0809e270u)(nullptr, 0, (int)scriptKey, e, (int)thisId, 1u, (int)arg);
+    g_msci_async_h = h;
+    snprintf(b, sizeof b, "ok spawn key=%d entry=%s THIS=%u arg=%u argc=%d -> handle=%d",
+             (int)scriptKey, entry.c_str(), thisId, arg, argc, h);
+    return b;
+}
+
+// THE dock recipe (button-faithful): spawn the engine's own dock orchestrator on the PLAYER ship.
+// run_script_async(ctx, 0, scriptKey, name, mode=1, argc=1, stationSceneId) where
+//   ctx      = *(scene+0x60)   (the script-system context the real per-object spawns pass),
+//   scriptKey= *(ship+0x90)    (the ship's script-context handle -> binds [THIS]=player), MUST be nonzero,
+//   stationSceneId = station obj+0x08 (args are scene-ids, not pointers).
+// The spawned task loops in-context: builds the bay-tunnel legs (dock_compute_approach_for_bay runs
+// safely inside the task) + advances MOVE_TO_POS/DOCK legs until obj+0x54==station — exactly the button.
+static std::string overlay_dock2(uint32_t station, std::string name, uint32_t ctxOvr, uint32_t keyOvr)
+{
+    mem_open_rw();
+    char b[256];
+    uint32_t ship = player_ship_addr();
+    if (!ship || !station) return "err no ship/station";
+    int32_t H = 0, stId = 0;
+    mem_read_i32(ship + 0x90, &H);                                   // ship's script-context handle
+    mem_read_i32(station + x3::off::OBJ_ID, &stId);
+    // ctx default = 0 (the captured NotifyTargetLock launch used ctx=0); scriptKey default = *(ship+0x90).
+    uint32_t ctx = ctxOvr;                                           // 0 default; override to test others
+    uint32_t key = keyOvr ? keyOvr : (uint32_t)H;
+    const char* nm = name.empty() ? "!move.movetostation" : name.c_str();
+    typedef int (__attribute__((cdecl)) *rsa_t)(void*, int, int, const char*, int, unsigned, ...);
+    int handle = ((rsa_t)0x0809e270u)((void*)(uintptr_t)ctx, 0, (int)key, nm, 1, 1u, (int)stId);
+    g_msci_async_h = handle;
+    snprintf(b, sizeof b,
+             "ok dock2 ship=0x%08x ctx=0x%08x key=0x%08x (ship+0x90=0x%08x) stId=%d name=%s -> handle=%d",
+             ship, ctx, key, (uint32_t)H, stId, nm, handle);
+    return b;
+}
+
+// VM-DOCK: integrate the engine VM. The bare run_script_async spawn fails on an IDLE ship because
+// *(ship+0x90) doesn't yet resolve the dock scripts. So FIRST run op-10 (DOCKAT) which sets the
+// command AND wires the ship's dock script-context, THEN read *(ship+0x90) FRESH and spawn
+// !move.movetostation through it (binds [THIS]=player) — the engine's own VM + scheduler run it.
+// Leak-guarded: aborts if a live dock task already owns the ship (the leak that helped OOM the game).
+static std::string overlay_vmdock(uint32_t station, int do_op10)
+{
+    mem_open_rw();
+    char b[256];
+    uint32_t ship = player_ship_addr();
+    if (!ship || !station) return "err no ship/station";
+    int32_t cur = 0; mem_read_i32(ship + x3::off::SHIP_NOTIFY_VAL, &cur);   // obj+0x7C = task handle
+    if (cur) {                                                              // leak guard
+        int32_t root = 0; mem_read_i32(0x08308880, &root);
+        typedef int (__attribute__((cdecl)) *lk_t)(int, int);
+        int t = ((lk_t)0x080a49e0u)((int)(uint32_t)root, cur);
+        if ((uint32_t)t >= 0x08000000u) return "abort: live dock task already on ship (leak guard)";
+    }
+    int32_t H0 = 0; mem_read_i32(ship + 0x90, &H0);                         // context BEFORE op-10
+    if (do_op10) player_cmdengage(ship, station, 10, 4, -1, 0);             // set DOCKAT + wire dock context
+    int32_t H = 0; mem_read_i32(ship + 0x90, &H);                           // context AFTER op-10 (fresh)
+    // owner = the SAME arg the WORKING input-dock passes to run_script_sync = *(g_game_session+0x418) (=9).
+    // Prior spawn attempts used ctx=0 / *(scene+0x60)=8 and failed; this is the untried correct owner.
+    int32_t gs = 0, owner = 0; mem_read_i32(0x0829f6b4, &gs);
+    if (gs) mem_read_i32((uint32_t)gs + 0x418, &owner);
+    int32_t stId = 0; mem_read_i32(station + x3::off::OBJ_ID, &stId);
+    typedef int (__attribute__((cdecl)) *rsa_t)(void*, int, int, const char*, int, unsigned, ...);
+    // Spawn the FULL dock orchestrator (set command DOCKAT + call !move.movetostation) with [THIS]=player.
+    int h = ((rsa_t)0x0809e270u)((void*)(uintptr_t)(uint32_t)owner, 0, (int)H,
+                                 "!ship.cmd.movestation.std", 1, 1u, (int)stId);
+    g_msci_async_h = h;
+    snprintf(b, sizeof b, "ok vmdock op10=%d owner=%d H90: 0x%08x->0x%08x stId=%d -> handle=%d",
+             do_op10, owner, (uint32_t)H0, (uint32_t)H, stId, h);
+    return b;
+}
+
+// Arm HW write-watches on up to 4 addresses; the SIGIO handler captures the writer EIP + stack.
+static std::string overlay_watchwrite(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3)
+{
+    uintptr_t addrs[4]; int n = 0;
+    if (a0) addrs[n++] = a0; if (a1) addrs[n++] = a1; if (a2) addrs[n++] = a2; if (a3) addrs[n++] = a3;
+    if (!n) return "err no addrs";
+    arm_write_watches(addrs, n);
+    char b[64]; snprintf(b, sizeof b, "ok armed %d watch(es)", g_wp_count); return b;
+}
+// Report the captured writer EIP + .text return addresses from the stack snapshot.
+static std::string overlay_watchip(void)
+{
+    char b[160];
+    snprintf(b, sizeof b, "ok writer_ip=0x%08lx hits=%d wrote=0x%08lx callers:",
+             g_writer_ip, g_wp_hits, g_writer_addr);
+    std::string r = b;
+    for (int i = 0; i < g_stack_n && i < 40; ++i) {
+        unsigned long v = g_stack[i];
+        if (v >= 0x08049000UL && v < 0x08300000UL) { char t[16]; snprintf(t, sizeof t, " %08lx", v); r += t; }
+    }
+    return r;
+}
+
+// Re-arm ONLY the command id on the player payload (+ bit19), preserving bay/target/dest/leg-cursor.
+static std::string overlay_setcmd(int cmd)
+{
+    mem_open_rw();
+    char buf[96];
+    uint32_t ship = player_ship_addr();
+    int32_t plw = 0;
+    if (!ship || !mem_read_i32(ship + x3::off::OBJ_PAYLOAD, &plw) || (uint32_t)plw < 0x08000000u)
+        return "err no ship/payload";
+    if (cmd >= 0) mem_write_u16((uint32_t)plw + x3::off::SHIP_CMD_ID, (uint16_t)cmd);
+    // OPEN THE EXECUTOR GATE: set bit19; clear bit27 (0x8000000 physics-idle/arrived) + bit9 (0x200
+    // manual-ctrl) — the executor only runs a ship while (obj+0x40 & 0x8000200)==0. Physics re-sets
+    // bit27 on each leg-arrival, so this must be re-applied (FSM) to keep the legs advancing.
+    { int32_t fl = 0; if (mem_read_i32(ship + x3::off::OBJ_FLAGS, &fl))
+          mem_write_u32(ship + x3::off::OBJ_FLAGS,
+                        ((uint32_t)fl | x3::off::AUTOPILOT_ENGAGED) & ~0x08000200u); }
+    int32_t back = 0; mem_read_i32((uint32_t)plw + x3::off::SHIP_CMD_ID, &back);
+    int32_t nfl = 0; mem_read_i32(ship + x3::off::OBJ_FLAGS, &nfl);
+    snprintf(buf, sizeof buf, "ok setcmd %d -> cmd(C4)=%d flags=0x%08x", cmd, back & 0xFFFF, nfl);
+    return buf;
+}
+
+// Spawn the engine's OWN dock orchestrator script `!move.movetostation` on the player ship via
+// run_script_async — the leg loop that re-issues MOVE/DOCK legs until obj+0x54==station (real dock).
+// `thismode` sweeps how the THIS handle + station arg are encoded (the binding is the open risk:
+// player-input sites pass ctx 0x96, the menu binds THIS=ship). handle!=0 = engine accepted the spawn.
+static std::string overlay_dockscript(uint32_t station, int thismode)
+{
+    char buf[208];
+    uint32_t ship = player_ship_addr();
+    if (!ship || !station) return "err no ship/station";
+    int32_t shipId = 0, stId = 0;
+    mem_read_i32(ship + x3::off::OBJ_ID, &shipId);
+    mem_read_i32(station + x3::off::OBJ_ID, &stId);
+    int thisH, arg;
+    switch (thismode) {
+        case 1:  thisH = shipId;     arg = stId;            break;  // ship scene-id + station scene-id
+        case 2:  thisH = (int)ship;  arg = (int)station;    break;  // raw pointers
+        case 3:  thisH = 0x96;       arg = (int)station;    break;  // player ctx + station pointer
+        default: thisH = 0x96;       arg = stId;            break;  // (0) player ctx + station scene-id
+    }
+    int exists = msci_find_id("!move.movetostation");                 // -1 if the script isn't loaded
+    int h = run_script_async(nullptr, 0, thisH, "!move.movetostation", 1, 1, arg);
+    g_msci_async_h = h;
+    snprintf(buf, sizeof buf, "ok dockscript mode=%d this=0x%x arg=0x%x ship=0x%08x st=0x%08x exists_id=%d handle=%d",
+             thismode, (unsigned)thisH, (unsigned)arg, ship, station, exists, h);
+    return buf;
+}
+
+// General MSCI script probe — call any script by name with arbitrary THIS handle + one arg, async
+// or sync, and report msci_find_id + the returned handle/value. For live ABI/resolution probing.
+static std::string overlay_runscript(std::string name, uint32_t thisH, uint32_t arg, int argc, int sync)
+{
+    char buf[256];
+    int found = msci_find_id(name.c_str());
+    long r;
+    if (sync) {
+        r = (argc <= 0) ? run_script_sync(nullptr, 0, (int)thisH, name.c_str(), 1, 0)
+                        : run_script_sync(nullptr, 0, (int)thisH, name.c_str(), 1, 1, (int)arg);
+        g_msci_sync_v = (int)r;
+    } else {
+        r = (argc <= 0) ? run_script_async(nullptr, 0, (int)thisH, name.c_str(), 1, 0)
+                        : run_script_async(nullptr, 0, (int)thisH, name.c_str(), 1, 1, (int)arg);
+        g_msci_async_h = (int)r;
+    }
+    snprintf(buf, sizeof buf, "ok runscript name=%s this=0x%x arg=0x%x argc=%d sync=%d find_id=%d ret=%ld",
+             name.c_str(), thisH, arg, argc, sync, found, r);
+    return buf;
+}
+
+// Multi-arg MSCI method probe — call a class method (e.g. StartExecuteCommand(cmdId, station))
+// with [THIS] = the instance that `thisH`(=*(ship+0x90)) resolves to, passing up to 5 int args.
+// run_script_async is variadic cdecl, so trailing args beyond argc are harmless.
+static std::string overlay_runscript2(std::string name, uint32_t thisH,
+                                      const std::vector<uint32_t>& a, int sync)
+{
+    char buf[300];
+    run_script_t fn = sync ? run_script_sync : run_script_async;
+    int n = (int)a.size();
+    long r = 0;
+    switch (n) {
+        case 0:  r = fn(nullptr,0,(int)thisH,name.c_str(),1,0); break;
+        case 1:  r = fn(nullptr,0,(int)thisH,name.c_str(),1,1,(int)a[0]); break;
+        case 2:  r = fn(nullptr,0,(int)thisH,name.c_str(),1,2,(int)a[0],(int)a[1]); break;
+        case 3:  r = fn(nullptr,0,(int)thisH,name.c_str(),1,3,(int)a[0],(int)a[1],(int)a[2]); break;
+        case 4:  r = fn(nullptr,0,(int)thisH,name.c_str(),1,4,(int)a[0],(int)a[1],(int)a[2],(int)a[3]); break;
+        default: r = fn(nullptr,0,(int)thisH,name.c_str(),1,5,(int)a[0],(int)a[1],(int)a[2],(int)a[3],(int)a[4]); break;
+    }
+    if (sync) g_msci_sync_v = (int)r; else g_msci_async_h = (int)r;
+    snprintf(buf, sizeof buf, "ok runscript2 name=%s this=0x%x nargs=%d sync=%d ret=%ld",
+             name.c_str(), thisH, n, sync, r);
+    return buf;
+}
+
+// Context-menu items: autopilot the PLAYER's own ship to `o`. (Only your own ship — NPCs
+// re-assert their own job each tick.) Enabled by object type.
+static void command_menu_items(const x3::ObjInfo& o)
+{
+    if (!o.addr) return;
+    uint32_t s = player_ship_addr();
+    bool dockable = (o.type == x3::off::TYPE_STATION || o.type == x3::off::TYPE_FACTORY);
+    bool isgate   = (o.type == x3::off::TYPE_GATE);
+    ImGui::TextDisabled("autopilot your ship:");
+    if (ImGui::MenuItem("Fly to"))                              player_autopilot(s, x3::off::CMD_FLYTO,  o.addr);
+    if (ImGui::MenuItem("Jump through", nullptr, false, isgate)) player_jumpgate(s, o.addr, 4);
+    if (ImGui::MenuItem("Dock at", nullptr, false, dockable))   player_dock_input(o);   // game's real Shift+D dock
+    if (ImGui::MenuItem("Stop autopilot"))                      player_autopilot_cancel(s);
+}
+
 // Read-only panel: list the objects in the player's current sector.
 static void map_panel(void)
 {
     if (!ImGui::Begin("x3ui - sector map")) { ImGui::End(); return; }
     mem_open();
+
+    if (g_cmd_dbg_wrote >= 0) {                  // last command-write proof (in-process readback)
+        bool landed = (g_cmd_dbg_readback == g_cmd_dbg_wrote);
+        ImGui::TextColored(landed ? ImVec4(0.4f,1,0.5f,1) : ImVec4(1,0.5f,0.3f,1),
+            "cmd: ship=0x%08x pl=0x%08x tgt=0x%08x wrote=%d back=%d  %s",
+            g_cmd_dbg_ship, g_cmd_dbg_payload, g_cmd_dbg_target, g_cmd_dbg_wrote, g_cmd_dbg_readback,
+            landed ? "WRITE LANDED" : "MISMATCH/no-op");
+    }
 
     // Throttle: re-walk ~6x/sec. Also FREEZE the refresh while the user is hovering
     // this window, so scrolling the table isn't fighting the live data churn.
@@ -931,12 +2338,7 @@ static void map_panel(void)
                 ImGui::Separator();
                 char idbuf[32]; snprintf(idbuf, sizeof idbuf, "%u", o.id);
                 if (ImGui::MenuItem("Copy id")) ImGui::SetClipboardText(idbuf);
-                ImGui::BeginDisabled();
-                ImGui::MenuItem("Move here");
-                ImGui::MenuItem("Dock at");
-                ImGui::MenuItem("Attack");
-                ImGui::EndDisabled();
-                ImGui::TextDisabled("(commands: coming with the script bridge)");
+                command_menu_items(o);
                 ImGui::EndPopup();
             }
             ImGui::TableSetColumnIndex(COL_DIST);
@@ -1298,7 +2700,7 @@ static void hull_gc(const std::vector<x3::ObjInfo>& live) {
 static void map3d_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(580, 480), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.55f);               // map panel reads clearly (not washed out)
+    ImGui::SetNextWindowBgAlpha(g_force_opaque ? 1.0f : 0.55f);  // map panel reads clearly (not washed out)
     if (!ImGui::Begin("x3ui - 3D map")) { ImGui::End(); return; }
     mem_open();
 
@@ -1419,7 +2821,7 @@ static void map3d_panel(void)
     }
 
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(6, 14, 22, 234));  // near-solid so the sensor map reads clearly
+    dl->AddRectFilled(p0, p1, IM_COL32(6, 14, 22, g_force_opaque ? 255 : 234));  // near-solid; fully opaque when game isn't clearing (no trails)
 
     const float U = x3::off::UNITS_PER_KM;
     auto KX = [&](int32_t a){ return (a - view.player_x) / U; };
@@ -1643,10 +3045,7 @@ static void map3d_panel(void)
         ImGui::Separator();
         char idbuf[32]; snprintf(idbuf, sizeof idbuf, "%u", ctx_obj.id);
         if (ImGui::MenuItem("Copy id")) ImGui::SetClipboardText(idbuf);
-        ImGui::BeginDisabled();
-        ImGui::MenuItem("Move here"); ImGui::MenuItem("Dock at"); ImGui::MenuItem("Attack");
-        ImGui::EndDisabled();
-        ImGui::TextDisabled("(commands: coming with the script bridge)");
+        command_menu_items(ctx_obj);
         ImGui::EndPopup();
     }
 
@@ -1665,7 +3064,7 @@ static int   g_mesh_lod = 2;   // 0 = finest (slow), higher = coarser (fast)
 static void mesh_preview_panel(void)
 {
     ImGui::SetNextWindowSize(ImVec2(380, 400), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.32f);               // translucent holo viewer
+    ImGui::SetNextWindowBgAlpha(g_force_opaque ? 1.0f : 0.32f);  // translucent holo viewer
     if (!ImGui::Begin("x3ui - mesh preview")) { ImGui::End(); return; }
 
     // Re-read geometry only when the selection changes (it's static per object).
@@ -1792,11 +3191,21 @@ static void overlay_draw(void)
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
+    // Did the game clear the color buffer for the frame we're about to composite
+    // onto? (Its clears happened during its render, before this SwapWindow.) If
+    // not (docked/menu: W_RectFill dStub), draw panels opaque so nothing trails.
+    g_force_opaque = !g_color_cleared;
+    g_color_cleared = false;                 // reset for the next frame
+    ImGuiStyle& style = ImGui::GetStyle();
+    const float saved_winbg_a = style.Colors[ImGuiCol_WindowBg].w;
+    if (g_force_opaque)                        // covers windows that don't set alpha explicitly
+        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+
     // Draw ImGui's cursor only while hovering the overlay; over the game world
     // draw nothing so the game's own cursor shows through.
     ImGui::GetIO().MouseDrawCursor = ImGui::GetIO().WantCaptureMouse;
 
-    ImGui::SetNextWindowBgAlpha(0.40f);
+    ImGui::SetNextWindowBgAlpha(g_force_opaque ? 1.0f : 0.40f);
     if (ImGui::Begin("x3ui")) {
         ImGui::Text("x3ui overlay  —  %.1f FPS", ImGui::GetIO().Framerate);
         ImGui::Separator();
@@ -1843,9 +3252,21 @@ static void overlay_draw(void)
     map_panel();
     map3d_panel();
     mesh_preview_panel();
+    text_trace_window();
+
+    style.Colors[ImGuiCol_WindowBg].w = saved_winbg_a;   // restore translucency
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+// ---- interposed: the game's color/depth clears ---------------------------
+X3UI_EXPORT void glClear(GLbitfield mask)
+{
+    if (!real_Clear)
+        real_Clear = (pfn_Clear)dlsym(RTLD_NEXT, "glClear");
+    if (mask & GL_COLOR_BUFFER_BIT) g_color_cleared = true;
+    if (real_Clear) real_Clear(mask);
 }
 
 // ---- interposed: per-frame buffer swap -----------------------------------
@@ -1866,8 +3287,10 @@ X3UI_EXPORT void SDL_GL_SwapWindow(SDL_Window *window)
 
     // Service the debug socket every frame on the main thread — even when the
     // overlay is hidden — so socket queries don't hang while ScrollLock is off.
-    if (g_inited)
+    if (g_inited) {
         x3::debug_server_pump();
+        drive_tick();                  // per-frame autopilot gate driver (keeps executor advancing)
+    }
 
     if (g_inited && g_ui_visible)
         overlay_draw();
@@ -1902,6 +3325,18 @@ X3UI_EXPORT void SDL_PumpEvents(void)
 {
     resolve_originals();
     if (real_PumpEvents) real_PumpEvents();
+
+    // Force a synthetic held key into SDL's keyboard STATE right after SDL refreshed it from
+    // the OS — this is the clean "fake a keypress" the game (which polls GetKeyboardState) sees.
+    if (g_synth_hold > 0) {
+        Uint8 *ks = (Uint8 *)SDL_GetKeyboardState(NULL);
+        if (ks) {
+            if (g_synth_sc)    ks[g_synth_sc] = 1;
+            if (g_synth_shift) { ks[SDL_SCANCODE_LSHIFT] = 1;
+                                 SDL_SetModState((SDL_Keymod)(SDL_GetModState() | KMOD_LSHIFT)); }
+        }
+        g_synth_hold--;
+    }
 
     if (!is_game_process() || !g_inited || !g_ui_visible || !real_PeepEvents)
         return;
@@ -1950,7 +3385,7 @@ X3UI_EXPORT int SDL_PeepEvents(SDL_Event *events, int numevents,
     resolve_originals();
     int n = real_PeepEvents(events, numevents, action, minType, maxType);
 
-    if (!is_game_process() || !g_inited || action != SDL_GETEVENT || n <= 0)
+    if (!is_game_process() || !g_inited || action != SDL_GETEVENT)
         return n;
 
     int kept = 0;
@@ -1973,6 +3408,20 @@ X3UI_EXPORT int SDL_PeepEvents(SDL_Event *events, int numevents,
             ImGui_ImplSDL2_ProcessEvent(&e);
 
         events[kept++] = e;       // pass everything through to the game
+    }
+
+    // Inject synthetic events queued by the synthkey harness (e.g. a faked Shift+D so the
+    // game's own input chain auto-docks). Deliver only those whose type is in the game's
+    // requested [minType,maxType] range and that fit the buffer; keep the rest queued.
+    if (g_synth_n > 0) {
+        int out = 0;
+        for (int s = 0; s < g_synth_n; ++s) {
+            if (kept < numevents && g_synth[s].type >= minType && g_synth[s].type <= maxType)
+                events[kept++] = g_synth[s];
+            else
+                g_synth[out++] = g_synth[s];
+        }
+        g_synth_n = out;
     }
     return kept;
 }

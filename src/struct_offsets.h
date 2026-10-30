@@ -92,4 +92,48 @@ constexpr uint32_t GRAVIDAR_SET_TARGET_FN = 0x08131d10u;  // void __cdecl(gravid
 constexpr int16_t  TARGET_MODE_LOCK       = 3;            // lock + brackets (+ NotifyTargetLock)
 constexpr int16_t  TARGET_MODE_CLEAR      = 0;            // clear target
 
+// Ship AI command — issue dock/move/attack from injected code. Engine has NO callable
+// setter; write the command struct on the ship PAYLOAD (= *(ship+0x50)) and the AI tick
+// auto-runs the bound built-in command script. Only gate is class==7, no owner check.
+// See memory x3-ship-set-command.
+// Autopilot command struct on the ship PAYLOAD (= *(ship+0x50)). The validated-DOCKAT engage
+// block @0x0811cb14 (and the MOVE/FLYTO handler @0x08123250) write these; the bound
+// !move.* MSCI script then navigates. CRITICAL: +0xAC/B0/B4 is the navigation DESTINATION
+// (fly-to: target world pos; dock: the computed approach point) — leaving it 0 = no goal =
+// raw thrust. See memory x3-ship-set-command.
+constexpr uint32_t SHIP_CMD_ID        = 0xC4;  // int16: command id (on payload)
+constexpr uint32_t SHIP_CMD_TARGET    = 0x98;  // ptr:   command target object (on payload)
+constexpr uint32_t SHIP_CMD_DEST      = 0xAC;  // int32 x3: navigation DESTINATION x,y,z (on payload)
+constexpr uint32_t SHIP_CMD_PAR1      = 0xAC;  // alias (legacy name)
+constexpr uint32_t SHIP_CMD_BAY       = 0xBC;  // int32: dock-bay index (dock only) (on payload)
+constexpr uint32_t SHIP_CMD_AUXTGT    = 0xBC;  // alias
+constexpr uint32_t SHIP_CMD_FAMILY    = 0xC0;  // int32: command-family index (validated-dock = 9) (on payload)
+constexpr uint32_t SHIP_CMD_STARTTIME = 0x84;  // u32: cmd start time (on payload)
+constexpr uint32_t SHIP_NOTIFY_OBJ    = 0x78;  // on SHIP obj: command-active handle (set 1 to arm)
+constexpr uint32_t SHIP_NOTIFY_VAL    = 0x7C;  // on SHIP obj: engine-computed handle (leave 0)
+constexpr uint32_t RENDER_CFG_TIME    = 0x6b8; // *(*RENDER_CONFIG + this) = current sim time
+constexpr int32_t  CMD_FAMILY_DOCK    = 9;     // +0xC0 value for validated DOCKAT
+// dock_compute_approach_for_bay(int station, int bayIdx, int* outWorldPos3, int ship, 0,0,0) cdecl —
+// fills outWorldPos with the world-space dock approach standoff for that bay (the engine's own math).
+constexpr uint32_t DOCK_APPROACH_FN   = 0x08104ff0u;
+constexpr int16_t  CMD_NONE     = 0x00;        // idle / abort
+constexpr int16_t  CMD_FLYTO    = 0x05;        // autopilot fly-to position/object (dest = target pos)
+constexpr int16_t  CMD_DOCKAT   = 0x04;        // dock at target (station/dockable)
+constexpr int16_t  CMD_ATTACK   = 0x14;        // attack target ship
+constexpr int16_t  CMD_FOLLOW   = 0x15;        // follow target ship
+constexpr int16_t  CMD_MOVE_OBJ = 0x18;        // fly to target object
+constexpr int16_t  CMD_MOVE_POS = 0x19;        // move to POSITION (dest = world x,y,z @+0xAC; no obj arrival)
+// Autopilot engage/disengage — DECOMPILED (don't guess this again):
+//  * obj+0x40 bit19 (0x80000): when SET, the arrival/auto-stop physics @0x0810cdc6 is SKIPPED
+//    so the autopilot keeps driving toward the destination; when CLEAR, arrival logic reclaims
+//    the ship and it stops. ENGAGE = set bit19 (MSCI engage @0x08118b49 ORs it in). DISENGAGE =
+//    clear bit19 ONLY (player_input_flight_handler @0x0805ad8b does `flags &= ~0x80000`).
+//  * bit18 (0x40000) is INERT for autopilot (permanent "player-controlled object" marker) — the
+//    executor never reads it; do NOT set/clear it.
+//  * The per-frame command executor @0x08105f00 runs the ship's command only while the gate
+//    `(obj+0x40 & 0x800200)==0 && (obj+0x47 & 2)==0` holds (bit9=0x200 manual-direct, bit23=
+//    0x800000 script-disable-AI). bit19 is NOT part of that gate.
+constexpr uint32_t AUTOPILOT_ENGAGED = 0x80000u;   // obj+0x40 bit19 (arrival-skip / engage)
+constexpr uint32_t EXEC_GATE_MASK    = 0x800200u;  // obj+0x40: any of these set => executor skips ship
+
 }} // namespace x3::off

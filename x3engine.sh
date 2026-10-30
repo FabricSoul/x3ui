@@ -32,4 +32,4 @@ if [ -n "${X3_FASTSTART_SLOT:-}" ]; then
 fi
 
 echo "[x3engine] launching $ENGINE (AppId=$SteamAppId) overlay args: ${ARGS[*]:-(none)}" >&2
-exec "./$ENGINE" "${ARGS[@]}"
+exec "./$ENGINE" "${ARGS[@]}" >/home/fabric/x3ui/x3engine.out 2>&1

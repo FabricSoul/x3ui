@@ -38,6 +38,61 @@ struct Mem {
     // big arrays (verts/tris); when unset, callers fall back to per-word u32 reads.
     // Returns false if any part is unreadable.
     std::function<bool(uint32_t addr, void* dst, size_t n)> bytes;
+    // Issue a guarded auto-dock of the PLAYER ship at `station`. WRITES memory + calls an
+    // engine fn — only safe on the main thread between frames (the debug pump). Returns a
+    // status string. Optional (unset in host tests). Test harness for the dock bridge.
+    std::function<std::string(uint32_t station, int cmd, int bay, int notify, int destmode)> issue_dock;
+    // Spawn the engine's own !move.movetostation orchestrator script on the player ship via
+    // run_script_async. `thismode` selects how the THIS handle + station arg are encoded
+    // (player-ctx 0x96 / ship scene-id / raw pointer) — to find the binding that actually docks.
+    std::function<std::string(uint32_t station, int thismode)> dockscript;
+    // General MSCI probe: run_script_async(0,0,thisHandle,name,1,argc,arg) + msci_find_id(name).
+    // Lets Claude live-probe script resolution + the THIS/arg ABI for any built-in script.
+    std::function<std::string(std::string name, uint32_t thisHandle, uint32_t arg, int argc, int sync)> runscript;
+    // Multi-arg variant: call an MSCI class method with [THIS]=thisHandle-instance + up to 5 int args
+    // (e.g. StartExecuteCommand(cmdId, station)). For driving the player's real command methods.
+    std::function<std::string(std::string name, uint32_t thisHandle, std::vector<uint32_t> args, int sync)> runscript2;
+    // Fly the player ship THROUGH a gate (move-to-position past the ring). `overshoot` km past gate.
+    std::function<std::string(uint32_t gate, int overshoot)> jumpgate;
+    // Call the engine command-ENGAGE (msci_native_operator_dispatch) on the player ship — the REAL
+    // autopilot with avoidance/dock/gate pathfinding. op 9=fly-to, 10=dock, 16/30=move variants.
+    std::function<std::string(uint32_t target, int op, int argc, int bay, int clear200)> cmdengage;
+    // Re-arm ONLY payload+0xC4 (+ bit19) on the player ship, preserving bay/target/dest (leg cursor).
+    // For testing whether re-arming cmd advances the engine's dock tunnel without resetting the cursor.
+    std::function<std::string(int cmd)> setcmd;
+    // HW write-watch: arm on up to 4 addrs (0=unused); capture the engine code (EIP) + stack that
+    // writes them. For finding the advancer that drives a docking NPC's command legs.
+    std::function<std::string(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3)> watchwrite;
+    std::function<std::string()> watchip;
+    // Per-frame autopilot gate driver: keep the player ship's executor gate open every frame.
+    std::function<std::string(int on, int rearm)> drive;
+    // Per-frame dock driver: re-issue SA subcmd `op` (10=approach, 9=enter) on the player toward
+    // `station` every frame (the working injected auto-dock). on=0 disables.
+    std::function<std::string(uint32_t station, int op, int bay, int on)> dockdrive;
+    std::function<std::string(uint32_t addr, uint32_t arg)> callfn1;
+    std::function<std::string(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2)> callfn3;
+    std::function<std::string(int subcmd, int argc, uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3)> sacall;
+    std::function<std::string(uint32_t addr, uint32_t val)> poke;   // raw u32 write (probing)
+    std::function<std::string(uint32_t cmdId, uint32_t traceAddr)> tracedock;   // arm trace@addr, fire input_dispatch(cmdId), dump (isolated)
+    std::function<std::string(uint32_t station, int stage)> spawnorch;   // Route B: hand-build dock-orchestrator MsciTask (staged)
+    std::function<std::string(uint32_t target_addr)> settarget;
+    // Queue a synthetic SDL key event into the game's input chain (clean "fake a keypress").
+    std::function<std::string(int scancode, int sym, int mod, int down)> synthkey;
+    // Force a key (+ optional shift) into SDL's polled keyboard STATE for N frames (polling-game fake).
+    std::function<std::string(int sc, int shift, int frames)> synthhold;
+    std::function<std::string()> synthdiag;
+    // Scheduler task introspection + spawn (the "control the scheduler" path).
+    std::function<std::string(uint32_t handle)> taskid;     // handle -> script id + THIS + program
+    std::function<std::string(uint32_t scriptKey, std::string entry, uint32_t thisId, uint32_t arg, int argc)> spawn;
+    // THE dock recipe: run_script_async(*(scene+0x60), 0, *(ship+0x90), name, 1, 1, stationSceneId).
+    // *(ship+0x90) = the ship's script-context handle = binds [THIS]=player. Spawns the real orchestrator.
+    std::function<std::string(uint32_t station, std::string name, uint32_t ctxOvr, uint32_t keyOvr)> dock2;
+    // Integrate the VM: op-10 (set DOCKAT + wire the ship's dock script-context) THEN spawn the
+    // orchestrator via run_script_async with the fresh *(ship+0x90). Leak-guarded.
+    std::function<std::string(uint32_t station, int do_op10)> vmdock;
+    std::function<std::string(uint32_t station, int stage)> natdock;  // native VM module: op-0x82 sub-0x0c deferred-bay DOCKAT
+    // Generic execute-trace: arm <addr> [filter] -> capture call args; addr 0 -> disarm + dump.
+    std::function<std::string(uint32_t addr, uint32_t filter)> exectrace;
 };
 
 struct SectorView {
