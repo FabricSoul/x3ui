@@ -3,3 +3,12 @@ libx3ui.so
 test_so.so
 *.o
 x3autoload.env
+x3engine.out
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
+
+# X-Studio (third-party MSCI script editor) — download it yourself, see README.
+tools/xstudio/
+tools/xstudio.rar
