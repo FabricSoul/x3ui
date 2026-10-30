@@ -1,0 +1,108 @@
+<?xml version="1.0" standalone="yes" ?>
+<?xml-stylesheet href="x2script.xsl" type="text/xsl" ?>
+<script>
+<name>plugin.x3ui.dockwatch</name>
+<version>1</version>
+<engineversion>40</engineversion>
+<description>x3ui bridge: poll X3UI.DOCKAT, START player ship docking</description>
+<arguments>
+</arguments>
+<sourceplaintext>
+<![CDATA[
+loop:
+@             = wait 500 ms
+  $t = get global variable: name='X3UI.DOCKAT'
+  if $t
+   set global variable: name='X3UI.DOCKAT' value=null
+@    START [PLAYERSHIP] -> call script '!ship.cmd.movestation.std' :  object=$t
+  end
+  goto label loop
+  return null
+]]>
+</sourceplaintext>
+<sourcetext>
+<line indent=""><var>loop</var><text>:</text></line>
+<line interruptable="@" indent=""><var>=&#160;</var><text>wait&#160;</text><var>500</var><text>&#160;ms</text></line>
+<line indent=""><var>$t&#160;=&#160;</var><text>get&#160;global&#160;variable:&#160;name=</text><var>'X3UI.DOCKAT'</var></line>
+<line indent=""><var>if&#160;</var><var>$t</var></line>
+<line indent="&#160;"><text>set&#160;global&#160;variable:&#160;name=</text><var>'X3UI.DOCKAT'</var><text>&#160;value=</text><var>null</var></line>
+<line interruptable="@" indent="&#160;"><var>START&#160;</var><var>[PLAYERSHIP]&#160;-&gt;</var><text>&#160;call&#160;script&#160;</text><call>!ship.cmd.movestation.std</call><text>&#160;:&#160;</text><text>&#160;object=</text><var>$t</var></line>
+<line indent=""></line>
+<line indent=""><text>goto&#160;label&#160;</text><var>loop</var></line>
+<line indent=""><text>return&#160;</text><var>null</var></line>
+</sourcetext>
+<codearray>
+
+<sval type="array" size="10">
+  <sval type="string" val="plugin.x3ui.dockwatch"/>
+  <sval type="int" val="40"/>
+  <sval type="string" val="x3ui bridge: poll X3UI.DOCKAT, START player ship docking"/>
+  <sval type="int" val="1"/>
+  <sval type="int" val="0"/>
+  <sval type="array" size="1">
+    <sval type="string" val="t"/>
+  </sval>
+  <sval type="array" size="9">
+    <sval type="array" size="2">
+      <sval type="int" val="101"/>
+      <sval type="string" val="loop"/>
+    </sval>
+    <sval type="array" size="4">
+      <sval type="int" val="105"/>
+      <sval type="int" val="-2147483647"/>
+      <sval type="int" val="4"/>
+      <sval type="int" val="500"/>
+    </sval>
+    <sval type="array" size="4">
+      <sval type="int" val="158"/>
+      <sval type="int" val="5"/>
+      <sval type="string" val="X3UI.DOCKAT"/>
+      <sval type="int" val="0"/>
+    </sval>
+    <sval type="array" size="7">
+      <sval type="int" val="104"/>
+      <sval type="int" val="-1610582525"/>
+      <sval type="int" val="1"/>
+      <sval type="int" val="131074"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="1"/>
+      <sval type="int" val="-1"/>
+    </sval>
+    <sval type="array" size="5">
+      <sval type="int" val="157"/>
+      <sval type="int" val="5"/>
+      <sval type="string" val="X3UI.DOCKAT"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+    </sval>
+    <sval type="array" size="8">
+      <sval type="int" val="102"/>
+      <sval type="string" val="!ship.cmd.movestation.std"/>
+      <sval type="int" val="-2147483646"/>
+      <sval type="int" val="131075"/>
+      <sval type="int" val="3"/>
+      <sval type="int" val="1"/>
+      <sval type="int" val="131074"/>
+      <sval type="int" val="0"/>
+    </sval>
+    <sval type="array" size="2">
+      <sval type="int" val="112"/>
+      <sval type="int" val="7"/>
+    </sval>
+    <sval type="array" size="2">
+      <sval type="int" val="100"/>
+      <sval type="int" val="0"/>
+    </sval>
+    <sval type="array" size="3">
+      <sval type="int" val="103"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+    </sval>
+  </sval>
+  <sval type="int" val="0"/>
+  <sval type="int" val="0"/>
+  <sval type="int" val="0"/>
+</sval>
+
+</codearray>
+</script>

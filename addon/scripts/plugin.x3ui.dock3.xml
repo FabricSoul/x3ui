@@ -1,0 +1,74 @@
+<?xml version="1.0" standalone="yes" ?>
+<?xml-stylesheet href="x2script.xsl" type="text/xsl" ?>
+<script>
+<name>plugin.x3ui.dock3</name>
+<version>1</version>
+<engineversion>40</engineversion>
+<description>x3ui dock3: PROBE + START [PLAYERSHIP] -&gt; command COMMAND_DOCKAT (op514 = the command-system way)</description>
+<arguments>
+<argument index="1" name="object" type="Var/Station/Carrier to dock at" desc="object to land on" />
+</arguments>
+<sourceplaintext>
+<![CDATA[
+  set global variable: name='X3UI.PROBE' value=424242
+@ START [PLAYERSHIP] -> command COMMAND_DOCKAT : arg1=$object, arg2=null, arg3=null, arg4=null
+  return null
+]]>
+</sourceplaintext>
+<sourcetext>
+<line indent=""><text>set&#160;global&#160;variable:&#160;name=</text><var>'X3UI.PROBE'</var><text>&#160;value=</text><var>424242</var></line>
+<line interruptable="@" indent=""><var>START&#160;</var><var>[PLAYERSHIP]&#160;-&gt;</var><text>&#160;command&#160;</text><var>COMMAND_DOCKAT</var><text>&#160;:&#160;arg1=</text><var>$object</var><text>,&#160;arg2=</text><var>null</var><text>,&#160;arg3=</text><var>null</var><text>,&#160;arg4=</text><var>null</var></line>
+<line indent=""><text>return&#160;</text><var>null</var></line>
+</sourcetext>
+<codearray>
+
+<sval type="array" size="10">
+  <sval type="string" val="plugin.x3ui.dock3"/>
+  <sval type="int" val="40"/>
+  <sval type="string" val="x3ui dock3: PROBE + START [PLAYERSHIP] command COMMAND_DOCKAT (op514)"/>
+  <sval type="int" val="1"/>
+  <sval type="int" val="0"/>
+  <sval type="array" size="1">
+    <sval type="string" val="object"/>
+  </sval>
+  <sval type="array" size="3">
+    <sval type="array" size="5">
+      <sval type="int" val="157"/>
+      <sval type="int" val="5"/>
+      <sval type="string" val="X3UI.PROBE"/>
+      <sval type="int" val="4"/>
+      <sval type="int" val="424242"/>
+    </sval>
+    <sval type="array" size="13">
+      <sval type="int" val="514"/>
+      <sval type="int" val="131075"/>
+      <sval type="int" val="3"/>
+      <sval type="int" val="18"/>
+      <sval type="int" val="7"/>
+      <sval type="int" val="131074"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+    </sval>
+    <sval type="array" size="3">
+      <sval type="int" val="103"/>
+      <sval type="int" val="0"/>
+      <sval type="int" val="0"/>
+    </sval>
+  </sval>
+  <sval type="array" size="1">
+    <sval type="array" size="2">
+      <sval type="int" val="41"/>
+      <sval type="string" val="object to land on"/>
+    </sval>
+  </sval>
+  <sval type="int" val="0"/>
+  <sval type="int" val="7"/>
+</sval>
+
+</codearray>
+</script>

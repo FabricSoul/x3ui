@@ -1,0 +1,153 @@
+<?xml version="1.0" standalone="yes" ?>
+<?xml-stylesheet href="x2script.xsl" type="text/xsl" ?>
+<script>
+<name>plugin.x3ui.docktest2</name>
+<version>1</version>
+<engineversion>40</engineversion>
+<description>x3ui one-shot v2: INLINE call movestation.std on [THIS] to dock the player</description>
+<arguments>
+</arguments>
+<sourceplaintext>
+<![CDATA[
+  $here = [PLAYERSHIP] -> get environment
+  $sector = [PLAYERSHIP] -> get sector
+  $stations = $sector -> get station array from sector
+  $n = size of array $stations
+  while $n
+    dec $n =
+    $s = $stations[$n]
+    skip if $s != $here
+      continue
+@   = [THIS] -> call script '!ship.cmd.movestation.std' :  object=$s
+    return null
+  end
+  return null
+]]>
+</sourceplaintext>
+<sourcetext>
+<line indent=""><var>$here&#160;=&#160;</var><var>[PLAYERSHIP]&#160;-&gt;</var><text>&#160;get&#160;environment</text></line>
+<line indent=""><var>$sector&#160;=&#160;</var><var>[PLAYERSHIP]&#160;-&gt;</var><text>&#160;get&#160;sector</text></line>
+<line indent=""><var>$stations&#160;=&#160;</var><var>$sector&#160;-&gt;</var><text>&#160;get&#160;station&#160;array&#160;from&#160;sector</text></line>
+<line indent=""><var>$n&#160;=&#160;</var><text>size&#160;of&#160;array&#160;</text><var>$stations</var></line>
+<line indent=""><var>while&#160;</var><var>$n</var></line>
+<line indent="&#160;"><var>dec&#160;</var><var>$n</var><text>&#160;=&#160;</text></line>
+<line indent="&#160;"><var>$s&#160;=&#160;</var><var>$stations</var><text>[</text><var>$n</var><text>]</text></line>
+<line indent="&#160;"><var>skip&#160;if&#160;</var><var>$s</var><text>&#160;!=&#160;</text><var>$here</var></line>
+<line indent="&#160;&#160;"><text>continue</text></line>
+<line interruptable="@" indent="&#160;"><var>=&#160;</var><var>[THIS]&#160;-&gt;</var><text>&#160;call&#160;script&#160;</text><call>!ship.cmd.movestation.std</call><text>&#160;:&#160;</text><text>&#160;object=</text><var>$s</var></line>
+<line indent="&#160;"><text>return&#160;</text><var>null</var></line>
+<line indent=""><text>end</text></line>
+<line indent=""><text>return&#160;</text><var>null</var></line>
+</sourcetext>
+<codearray>
+
+  <sval type="array" size="10">
+    <sval type="string" val="plugin.x3ui.docktest2"/>
+    <sval type="int" val="40"/>
+    <sval type="string" val="x3ui one-shot v2: INLINE call movestation.std on [THIS] to dock the player"/>
+    <sval type="int" val="1"/>
+    <sval type="int" val="0"/>
+    <sval type="array" size="5">
+      <sval type="string" val="here"/>
+      <sval type="string" val="sector"/>
+      <sval type="string" val="stations"/>
+      <sval type="string" val="n"/>
+      <sval type="string" val="s"/>
+    </sval>
+    <sval type="array" size="13">
+      <sval type="array" size="4">
+        <sval type="int" val="702"/>
+        <sval type="int" val="131075"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="0"/>
+      </sval>
+      <sval type="array" size="4">
+        <sval type="int" val="703"/>
+        <sval type="int" val="131075"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="1"/>
+      </sval>
+      <sval type="array" size="4">
+        <sval type="int" val="1009"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="2"/>
+      </sval>
+      <sval type="array" size="4">
+        <sval type="int" val="131"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="2"/>
+      </sval>
+      <sval type="array" size="7">
+        <sval type="int" val="104"/>
+        <sval type="int" val="-1610608887"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="-1"/>
+      </sval>
+      <sval type="array" size="2">
+        <sval type="int" val="143"/>
+        <sval type="int" val="3"/>
+      </sval>
+      <sval type="array" size="6">
+        <sval type="int" val="129"/>
+        <sval type="int" val="4"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="2"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="3"/>
+      </sval>
+      <sval type="array" size="13">
+        <sval type="int" val="104"/>
+        <sval type="int" val="-536864505"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="4"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="0"/>
+        <sval type="int" val="15"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="3"/>
+        <sval type="int" val="-1"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="-2"/>
+      </sval>
+      <sval type="array" size="2">
+        <sval type="int" val="112"/>
+        <sval type="int" val="4"/>
+      </sval>
+      <sval type="array" size="8">
+        <sval type="int" val="102"/>
+        <sval type="string" val="!ship.cmd.movestation.std"/>
+        <sval type="int" val="-2147483647"/>
+        <sval type="int" val="131075"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="1"/>
+        <sval type="int" val="131074"/>
+        <sval type="int" val="4"/>
+      </sval>
+      <sval type="array" size="3">
+        <sval type="int" val="103"/>
+        <sval type="int" val="0"/>
+        <sval type="int" val="0"/>
+      </sval>
+      <sval type="array" size="2">
+        <sval type="int" val="112"/>
+        <sval type="int" val="4"/>
+      </sval>
+      <sval type="array" size="3">
+        <sval type="int" val="103"/>
+        <sval type="int" val="0"/>
+        <sval type="int" val="0"/>
+      </sval>
+    </sval>
+    <sval type="int" val="0"/>
+    <sval type="int" val="0"/>
+    <sval type="int" val="0"/>
+  </sval>
+
+</codearray>
+</script>
