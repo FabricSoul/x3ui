@@ -10,6 +10,13 @@ The game binary is never modified. Nothing is patched on disk. The overlay inter
 SDL2 symbols the engine already calls and does everything else by reading and writing the
 process's own memory.
 
+![The x3ui overlay running over X3: Albion Prelude in flight](docs/images/x3ui-overlay-in-flight.png)
+
+*The overlay in flight: the sector table (right) listing all 79 objects in sector — 49 ships,
+3 stations — with faction-coloured names, live distance and position, and the 3D map
+(bottom left) showing the same sector as geometry. Everything is read live out of the
+running engine.*
+
 > This was built by reverse-engineering a 32-bit, non-PIE, stripped-ish ELF (`X3AP_main`,
 > image base `0x08048000`) with no source, no symbols beyond the dynamic table, and no
 > modding API for any of this. The `docs/` tree is the map of what was found.
@@ -28,6 +35,13 @@ process's own memory.
 | **Target bridge** | Click an object in the table or the 3D map and the *game's* HUD target changes. The game's live target is read back and highlighted in both views, so the overlay and the cockpit never disagree. |
 | **Command bridge** | Right-click → "Move to / Dock at / Attack / Follow / Stop", issued by writing the ship's AI command struct, which the engine's per-frame executor then runs. |
 | **Live debug socket** | A read-only introspection server on `127.0.0.1:7373` (`read`/`reads`/`bytes`/`cstr`/`children`/`scene`/`sector`/`owire`) serviced between frames. This is the tool that made the whole project tractable — see below. |
+
+![The 3D holographic sector map](docs/images/x3ui-3d-map.png)
+
+*The 3D map. Stations, gates and asteroids are real engine meshes, not icons — read out of
+the game's resident model data and placed every frame from the live engine transform. The
+sphere is drawn at the player's actual gravidar scanner range; the vertical ticks are height
+cues down to the reference plane.*
 
 Aesthetically it's built as a **game mod, not a dev tool**: translucent holographic panels,
 lean and cinematic, meant to sit over the cockpit.
@@ -124,6 +138,12 @@ you will pay for twice.
 ---
 
 ## Status
+
+> **This project is no longer in development.** I ran out of time for it. What's here works
+> as described, but the unfinished parts will stay unfinished unless someone else picks them
+> up — so please fork rather than wait on an issue reply. It's published because the
+> reverse-engineering notes in `docs/` are probably worth more to the X3 modding scene than
+> the overlay itself.
 
 | Feature | State |
 |---|---|
