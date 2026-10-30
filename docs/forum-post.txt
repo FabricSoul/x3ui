@@ -1,5 +1,6 @@
 Egosoft forum announcement post for x3ui — BBCode, ready to paste.
-Subject line below, then the body.
+Subject line below, then the body. Everything beyond the basics is deliberately
+left to the GitHub README.
 
 Note on the two [img] tags: they hotlink the screenshots straight from the repo via
 raw.githubusercontent.com, so they stay in sync with whatever is on main. The hero shot is
@@ -18,232 +19,36 @@ BODY (BBCode)
 
 Hi everyone!
 
-I've been working on something that may interest X3 modders on Linux, and
-particularly anyone who has wondered how far the game's UI can be pushed without
-touching a single game file.
+[b]x3ui[/b] is an open-source injected UI for X3: Albion Prelude and Terran Conflict on
+Linux — a Dear ImGui overlay LD_PRELOADed into the running engine. It walks the engine's
+live object graph out of process memory and renders the current sector as a sortable object
+table and a 3D holographic map drawn from the game's own ship geometry, then writes back:
+clicking an object sets your HUD target.
 
-[b]x3ui[/b] is an open-source injected UI for X3: Albion Prelude and Terran
-Conflict — a Dear ImGui overlay that is LD_PRELOADed into the running engine. It
-is not a read-only HUD. It walks the engine's live object graph out of process
-memory, renders the current sector as a sortable object table and as a 3D
-holographic map drawn from the engine's own ship geometry, and then writes back:
-setting your HUD target and issuing ship commands from the overlay.
-
-The game executable is never modified and nothing is patched on disk. The overlay
-interposes two SDL2 symbols the engine already imports, and does everything else
-by reading and writing the process's own memory.
-
-GitHub: https://github.com/FabricSoul/x3ui
+The game executable is never modified and nothing is patched on disk.
 
 [img]https://raw.githubusercontent.com/FabricSoul/x3ui/main/docs/images/x3ui-overlay-in-flight.png[/img]
 
-[i]The overlay in flight: the sector table on the right listing all 79 objects in sector —
-49 ships, 3 stations — with faction-coloured names, live distance and position, and the 3D
-map bottom left showing the same sector as geometry. All of it read live out of the running
-engine.[/i]
-
-[b]Up front: this is no longer in development.[/b] I ran out of time for it. What
-is in the repository works as described below, but the unfinished parts will stay
-unfinished unless someone else picks them up. I'm posting it because the
-reverse-engineering notes are probably more useful to this forum than the overlay
-itself.
-
-[b]What works:[/b]
-
-[list]
-[*][b]Live sector readout.[/b] Every object in your sector — ships, stations,
-gates, asteroids, wares — with id, name, type, faction and distance. Sortable and
-hideable columns, sticky header, EVE-overview-style filters (all / ships /
-stations / gates / roids / other), with independent filter sets for the table and
-the 3D map.
-[*][b]Correct visibility.[/b] Objects are gated by the player's gravidar scanner
-range and by the engine's internal/despawn flags, so the overlay shows what the
-in-game sector map would show and does not leak information you haven't earned.
-[*][b]Names resolved properly.[/b] Object names come from the engine's own text
-database, including unresolved {page,id} references expanded through the engine's
-get_text_simple rather than displayed raw.
-[*][b]3D holographic map.[/b] Orbit/pan camera, double-click focus that tracks a
-moving ship, faction colouring, height cues and ground ticks, hover tooltips, and
-a sensor sphere drawn at your actual scanner range.
-[*][b]Real ship hulls, not icons.[/b] The 3D map draws actual engine geometry. Each
-object's finest mesh is read once out of the engine's resident CPU model data,
-cached un-rotated in body frame, given generated vertex normals, and then placed
-every frame from the live engine transform — rendered through a small GL program
-with an additive fresnel rim glow.
-[*][b]Target bridge.[/b] Click an object in the table or the 3D map and the game's
-HUD target changes. The game's live target is read back and highlighted in both
-views, so the overlay and the cockpit never disagree.
-[*][b]Read-only debug socket.[/b] A text introspection server on 127.0.0.1:7373
-(read / reads / bytes / cstr / children / chain / scene / sector / owire),
-serviced on the main thread between frames so a walk never races the engine
-mutating the structure it is walking. This is the tool that made the whole
-project tractable — with the game sitting in flight you can read arbitrary
-addresses, dump structs and walk child lists with no rebuild and no relaunch.
-[/list]
-
 [img]https://raw.githubusercontent.com/FabricSoul/x3ui/main/docs/images/x3ui-3d-map.png[/img]
 
-[i]The 3D map. Stations, gates and asteroids are real engine meshes rather than icons — read
-out of the game's resident model data and placed every frame from the live engine transform.
-The sphere is drawn at the player's actual gravidar scanner range; the vertical ticks are
-height cues down to the reference plane.[/i]
+Those station, gate and asteroid shapes are real engine meshes, not icons — read out of the
+game's resident model data and placed every frame from the live engine transform. The sphere
+is your actual gravidar scanner range.
 
-[b]What is only partly done:[/b]
+[b]Honest status: this is no longer in development.[/b] I ran out of time for it. The read
+side, the 3D map and the target bridge work; the ship command menu and the player auto-dock
+are unfinished prototypes. It's Linux-only and the launcher scripts still hardcode my paths.
+Please fork rather than wait on an issue reply.
 
-[list]
-[*][b]Command bridge.[/b] Right-click an object for "Move to / Dock at / Attack /
-Follow / Stop", issued by writing the ship's AI command struct (command id at
-payload+0xC4, target at +0x98), which the engine's per-frame executor then runs.
-The offsets and command ids are verified, the menu is built and wired, but it is
-only partially live-verified — treat it as a prototype.
-[*][b]Player auto-dock.[/b] A per-frame injected script-access op does drive the
-player's dock approach; the final entry/clearance leg is still open. The engine's
-own dock orchestrator is an MSCI script FSM that will not accept the player's
-ship, and chasing that is what produced most of the VM documentation below. The
-write-up is the deliverable here, not a working feature.
-[*][b]Off-screen LOD selector.[/b] The engine's per-frame visibility bit is stale
-for off-screen objects, so hull rendering falls back to drawing all real models
-there, which can show extra internal geometry until the object comes on screen.
-The transform is correct off-screen; only the LOD selection is wrong.
-[/list]
+I'm mostly posting it for the reverse-engineering notes, which are probably more useful to
+this forum than the overlay itself — the render pipeline (draw gates, LOD, the fixed-point
+transform convention), the MSCI .pck codearray format so scripts can be hand-built without
+the in-game editor, the script VM and task scheduler, and the ship command/autopilot
+structures. All of it tagged for whether it was decompiled or confirmed live in flight.
 
-[b]Documented engine internals (the part I would actually point a modder at):[/b]
+Full feature list, build instructions, limitations and all the engine documentation are in
+the README:
 
-[list]
-[*][b]docs/x3-render-pipeline.md[/b] — a claim-by-claim account of how the engine
-draws an object, with every statement tagged (D) decompiled or (L) live-verified:
-the two object representations and which one the renderer walks, drawable
-enumeration in render_object @0x080762f0, the static per-part "is this a real
-mesh" gate in render_mesh_part @0x081665b0 versus the per-frame visibility flag,
-the cached LOD selector, and the fixed-point transform convention in
-set_object_modelview_matrices @0x08160ee0 (vertices ÷16384, orientation and
-per-axis scale 16.16, orientation stored column-major).
-[*][b]docs/x3-msci-codearray-format.md[/b] — how a compiled MSCI .pck actually
-encodes: the array-10 wrapper, the opcode table, value-pair type tags,
-START-versus-inline call, and the if/goto model. Decoded statically from stock
-scripts, so a .pck can be hand-built without the in-game Script Editor.
-[*][b]MSCI script VM notes[/b] — the bytecode interpreter (msci_vm_run_task
-@0x080a1710, jump table @0x0819b398, ops 0x00–0xB1), the task struct and
-scheduler, the sole task-creation choke point (script_resolve_and_alloc_task
-@0x080b5450), and how C code and the VM are coupled through the script-access
-class dispatch.
-[*][b]Ship command and autopilot notes[/b] — there is no callable setter; you write
-the command struct on the ship payload. Verified ids: DOCKAT=0x04, ATTACK=0x14,
-FOLLOW=0x15, MOVE_OBJ=0x18, UNDOCK=0x21. Autopilot is bit 19 of obj+0x40 and is
-set exclusively through one script-access op. The physical undock leaf is
-ship_launch_from_dock_physical @0x080f3a80 and is directly callable.
-[*][b]tools/x3cat.py[/b] — read the game archives directly: cat is a rolling XOR
-0xDB, dat is XOR 0x33, pck is gzip. The base text pages and types/*.txt exist
-only inside the archives.
-[/list]
-
-One warning that cost me an afternoon: [b]do not call model_load_resolve
-@0x08080ca0 on a live game[/b]. It poisons a sticky negative cache and models stop
-loading until you restart.
-
-[b]Example usage:[/b]
-
-[code]
-git clone --recurse-submodules https://github.com/FabricSoul/x3ui
-cd x3ui
-
-nix-shell --run 'make'      # 32-bit build -> libx3ui.so
-make test                   # host unit tests for the pure logic (any shell)
-
-# Then set the game's Steam launch options to:
-#   /path/to/x3ui/x3run.sh %command%
-
-./x3launch.sh               # auto-load newest save, straight into flight
-./x3launch.sh 13            # auto-load save slot 13
-tools/x3dbg sector          # dump the live sector over the debug socket
-[/code]
-
-ScrollLock toggles the overlay.
-
-[b]How it was built:[/b]
-
-Four things did most of the work, and they transfer to any other injection project
-on this engine.
-
-[list=1]
-[*][b]Injection without patching.[/b] libx3ui.so interposes SDL_GL_SwapWindow (once
-per frame, right before the buffer flip — draw an ImGui frame, then forward to the
-real swap via dlsym(RTLD_NEXT)) and SDL_PeepEvents (the engine's event pump — feed
-events to ImGui and, when the overlay has focus, swallow them so they never reach
-the game). Both are confirmed present in nm -D X3AP_main.
-[*][b]Reads that cannot crash the game.[/b] Every engine read goes through pread on
-/proc/self/mem and every write through pwrite on a second O_RDWR fd. We are
-in-process, so this is our own memory, but routing through the kernel means a stale
-pointer returns -1 instead of raising SIGSEGV. A wrong offset gives you a blank
-panel, never a crash. All walks are additionally bounded by explicit node, vertex
-and edge caps, so a corrupt or cyclic structure cannot hang a frame.
-[*][b]Decompile, then live-verify, then document.[/b] Decompile the function in
-Ghidra, confirm the claim against the running game through the debug socket, write
-it down tagged (D) or (L), and only then build on it. The corollary, learned the
-hard way: verify the data before assuming a logic bug. A render that looks wrong is
-very often a misread field rather than bad maths.
-[*][b]Tests for the parts that don't need a game.[/b] The sector walk, scene-graph
-traversal, transform composition, LOD selection, normal generation and text
-expansion are pure logic over fixed-width types behind a small memory-access
-interface, so the same code runs against the live game and against a fake address
-space in host unit tests — currently 129 checks covering null names, null
-transforms, reference cycles, cap exhaustion and bulk-read equivalence. Graphics
-and injection get verified live; everything else gets verified in milliseconds.
-[/list]
-
-Getting the .so to load inside Steam's pressure-vessel container was its own
-sub-project: a 32-bit nix shell so the compiler targets i686 natively,
--static-libstdc++ so we don't depend on the container's older ABI, patchelf
---remove-rpath so the loader resolves libraries inside the container instead of
-dead /nix/store paths, weak stubs for two SDL2 symbols the shipped SDL is too old
-to provide, a process-name gate so the library goes dormant in every other process
-of Steam's launch chain, and a launcher pair that replaces the game's flaky GL
-probe and starts the engine directly with -skipintro -faststart.
-
-[b]A bit of background:[/b]
-
-X3's own sector map and context menus are the bits of the game I always wanted to
-replace rather than extend, and MSCI can't reach them — menu rows and action
-dispatch live script-side, and there is no C-level menu manager to call. Going in
-through the renderer and the object graph instead turned out to be surprisingly
-tractable, mostly because the engine keeps a clean intrusive object list and a
-conventional scene graph.
-
-The engine work was done with AI assistance (Claude), used as a decompilation and
-note-taking partner rather than as an oracle: every offset in the repository was
-live-verified against the running game before being relied on, and the (D)/(L)
-tagging in the docs records which claims are decompiled and which are confirmed in
-flight. The methodology notes and per-feature design documents in the repository
-are part of that workflow and are checked in alongside the code.
-
-[b]Current status and limitations:[/b]
-
-[list]
-[*][b]Not in development any more.[/b] No time. Issues and PRs will probably sit
-unanswered, so please fork rather than wait on me.
-[*][b]Linux only.[/b] The whole approach is LD_PRELOAD plus the Steam Runtime
-container. There is no Windows build and making one would mean a different
-injection strategy entirely.
-[*][b]Paths are hardcoded[/b] to my machine in x3run.sh, x3engine.sh and
-x3launch.sh — the repository path, the Steam library location and the save
-directory. Edit those three scripts before the first run. This is the obvious first
-thing to fix for anyone else running it.
-[*][b]Offsets are build-specific.[/b] Everything was verified against the Steam
-Linux build of Albion Prelude I was running. All of it is collected in
-src/struct_offsets.h, so re-basing onto another build is a matter of one header
-rather than a hunt through the source, but it has not been tested anywhere else.
-[*][b]It writes to the live game's memory.[/b] Use a save you don't mind losing.
-[*]The command bridge and the dock work are prototypes, as described above. The
-read side, the 3D map and the target bridge are the parts I would call finished.
-[/list]
-
-Everything is MIT licensed. The overlay is C++17 with Dear ImGui and no
-dependencies beyond the SDL2 and OpenGL the game already ships; the tools are
-Python standard library only.
-
-If anyone does pick this up, the places I would start are the hardcoded paths, the
-off-screen LOD selector, and the player dock entry leg — and I would be glad to
-hear it got further than I did.
-
-Source, documentation and the engine notes:
 https://github.com/FabricSoul/x3ui
+
+MIT licensed. Happy to answer questions in this thread.
